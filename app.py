@@ -298,7 +298,7 @@ st.sidebar.download_button(
 
 st.sidebar.divider()
 
-opciones_menu = ["🛒 Punto de Venta (POS)", "📦 Gestión de Productos", "📁 Categorías y Proveedores", "👥 Clientes y Empleados", "📊 Histórico de Ventas", "📐 Modelo Entidad-Relación (MER)"]
+opciones_menu = ["🛒 Punto de Venta (POS)", "📈 Sala Estadística (Analytics)", "📦 Gestión de Productos", "📁 Categorías y Proveedores", "👥 Clientes y Empleados", "📊 Histórico de Ventas", "📐 Modelo Entidad-Relación (MER)"]
 if es_admin:
     opciones_menu.append("📜 Bitácora de Auditoría (.LDF)")
 
@@ -371,10 +371,15 @@ if opcion == "🛒 Punto de Venta (POS)":
                         id_venta = cur.fetchone()[0]
                         
                         detalles_log = []
+                        productos_agotados = []
+                        
                         for item in st.session_state.carrito:
                             cur.execute("INSERT INTO DETALLE_VENTA (id_venta, id_producto, cantidad, precio_unitario, subtotal) VALUES (%s, %s, %s, %s, %s);",
                                         (id_venta, item['id_producto'], item['cantidad'], item['precio'], item['subtotal']))
-                            cur.execute("UPDATE PRODUCTO SET stock = stock - %s WHERE id_producto = %s;", (item['cantidad'], item['id_producto']))
+                            cur.execute("UPDATE PRODUCTO SET stock = stock - %s WHERE id_producto = %s RETURNING stock, nombre;", (item['cantidad'], item['id_producto']))
+                            res_stk = cur.fetchone()
+                            if res_stk and res_stk[0] == 0:
+                                productos_agotados.append(res_stk[1])
                             detalles_log.append(f"{item['nombre']} (x{item['cantidad']})")
                             
                         conn.commit()
@@ -383,6 +388,11 @@ if opcion == "🛒 Punto de Venta (POS)":
                         
                         st.session_state.carrito = []
                         registrar_log("VENTA_PROCESADA", f"Venta N°{id_venta} por S/{total_venta:.2f}. Productos: {', '.join(detalles_log)}")
+                        
+                        # Alerta emergente flotante arriba a la derecha si un producto llega a stock 0
+                        for prod_agotado in productos_agotados:
+                            st.toast(f"🚨 ¡ATENCIÓN! El producto '{prod_agotado}' se ha quedado SIN STOCK.", icon="⚠️")
+                            
                         st.balloons()
                         st.success(f"🎉 ¡Venta N° {id_venta} registrada con éxito!")
                         st.rerun()
@@ -396,7 +406,117 @@ if opcion == "🛒 Punto de Venta (POS)":
             st.info("El carrito de compras está vacío.")
 
 # ==========================================
-# MÓDULO 2: GESTIÓN DE PRODUCTOS
+# MÓDULO 2: SALA ESTADÍSTICA (ANALYTICS)
+# ==========================================
+elif opcion == "📈 Sala Estadística (Analytics)":
+    st.title("📈 Sala Estadística y Análisis de Negocio")
+    st.caption("Métricas clave de rendimiento, ventas e inventario en tiempo real.")
+
+    # Consultas de estadísticas
+    df_kpi_v = consultar_db("SELECT COUNT(id_venta) as total_ventas, COALESCE(SUM(total),0) as total_ingresos, COALESCE(AVG(total),0) as ticket_promedio FROM VENTA")
+    df_kpi_units = consultar_db("SELECT COALESCE(SUM(cantidad),0) as unidades_vendidas FROM DETALLE_VENTA")
+    df_prod_estrella = consultar_db("SELECT p.nombre, SUM(d.cantidad) as total_cant FROM DETALLE_VENTA d JOIN PRODUCTO p ON d.id_producto = p.id_producto GROUP BY p.nombre ORDER BY total_cant DESC LIMIT 1")
+    df_agotados = consultar_db("SELECT COUNT(*) as count FROM PRODUCTO WHERE stock = 0")
+    
+    total_ingresos = df_kpi_v['total_ingresos'].values[0] if not df_kpi_v.empty else 0.0
+    total_transacciones = df_kpi_v['total_ventas'].values[0] if not df_kpi_v.empty else 0
+    ticket_prom = df_kpi_v['ticket_promedio'].values[0] if not df_kpi_v.empty else 0.0
+    total_unidades = df_kpi_units['unidades_vendidas'].values[0] if not df_kpi_units.empty else 0
+    prod_top_nombre = df_prod_estrella['nombre'].values[0] if not df_prod_estrella.empty else "N/A"
+    cant_agotados = df_agotados['count'].values[0] if not df_agotados.empty else 0
+
+    # Tarjetas KPI superiores
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("💰 Total Ingresos", f"S/ {total_ingresos:,.2f}")
+    k2.metric("📦 Unidades Vendidas", f"{total_unidades:,}")
+    k3.metric("🎟️ Ticket Promedio", f"S/ {ticket_prom:,.2f}")
+    k4.metric("🏆 Producto Estrella", prod_top_nombre)
+    k5.metric("🚨 Stock Cero (Agotados)", f"{cant_agotados} ítems", delta_color="inverse")
+
+    st.divider()
+
+    # Gráficos Visuales
+    col_g1, col_g2 = st.columns(2)
+    
+    with col_g1:
+        st.subheader("📊 Ventas por Categoría (S/)")
+        df_cat_sales = consultar_db("""
+            SELECT c.nombre as "Categoría", SUM(d.subtotal) as "Monto (S/)"
+            FROM DETALLE_VENTA d
+            JOIN PRODUCTO p ON d.id_producto = p.id_producto
+            JOIN CATEGORIA c ON p.id_categoria = c.id_categoria
+            GROUP BY c.nombre
+            ORDER BY "Monto (S/)" DESC
+        """)
+        if not df_cat_sales.empty:
+            st.bar_chart(df_cat_sales.set_index("Categoría"))
+        else:
+            st.info("Aún no hay datos de ventas registradas.")
+
+    with col_g2:
+        st.subheader("📈 Tendencia Histórica de Ventas")
+        df_date_sales = consultar_db("""
+            SELECT DATE(fecha) as "Fecha", SUM(total) as "Ingresos (S/)"
+            FROM VENTA
+            GROUP BY DATE(fecha)
+            ORDER BY "Fecha" ASC
+        """)
+        if not df_date_sales.empty:
+            st.line_chart(df_date_sales.set_index("Fecha"))
+        else:
+            st.info("Aún no hay historial de fechas.")
+
+    st.divider()
+
+    # Ranking Completo de Clientes
+    st.subheader("👑 Ranking Completo de Clientes")
+    df_ranking_clientes = consultar_db("""
+        SELECT 
+            c.id_cliente as "ID",
+            c.nombre as "Nombre Cliente",
+            c.documento as "DNI / RUC",
+            c.telefono as "Teléfono",
+            COUNT(v.id_venta) as "N° Compras",
+            COALESCE(SUM(v.total), 0) as "Total Gastado (S/)"
+        FROM CLIENTE c
+        LEFT JOIN VENTA v ON c.id_cliente = v.id_cliente
+        GROUP BY c.id_cliente, c.nombre, c.documento, c.telefono
+        ORDER BY "Total Gastado (S/)" DESC
+    """)
+    if not df_ranking_clientes.empty:
+        st.dataframe(df_ranking_clientes, use_container_width=True)
+    else:
+        st.info("No se han registrado clientes.")
+
+    st.divider()
+
+    # Productos con Stock Crítico o Agotados
+    col_p_top, col_p_low = st.columns(2)
+    with col_p_top:
+        st.subheader("🔥 Top 5 Productos Más Vendidos")
+        df_top5 = consultar_db("""
+            SELECT p.nombre as "Producto", SUM(d.cantidad) as "Cant. Vendida", SUM(d.subtotal) as "Total (S/)"
+            FROM DETALLE_VENTA d
+            JOIN PRODUCTO p ON d.id_producto = p.id_producto
+            GROUP BY p.nombre
+            ORDER BY "Cant. Vendida" DESC
+            LIMIT 5
+        """)
+        st.dataframe(df_top5, use_container_width=True)
+
+    with col_p_low:
+        st.subheader("⚠️ Alerta de Inventario Crítico (Stock <= 5)")
+        df_low_stock = consultar_db("""
+            SELECT p.id_producto as "ID", p.nombre as "Producto", p.stock as "Stock Actual", c.nombre as "Categoría"
+            FROM PRODUCTO p
+            LEFT JOIN CATEGORIA c ON p.id_categoria = c.id_categoria
+            WHERE p.stock <= 5
+            ORDER BY p.stock ASC
+        """)
+        st.dataframe(df_low_stock, use_container_width=True)
+
+# ==========================================
+# MÓDULO 3: GESTIÓN DE PRODUCTOS
 # ==========================================
 elif opcion == "📦 Gestión de Productos":
     st.title("📦 Gestión de Inventario y Productos")
@@ -459,7 +579,7 @@ elif opcion == "📦 Gestión de Productos":
             st.info("🔒 La opción de eliminar productos requiere permisos de Administrador.")
 
 # ==========================================
-# MÓDULO 3: CATEGORÍAS Y PROVEEDORES
+# MÓDULO 4: CATEGORÍAS Y PROVEEDORES
 # ==========================================
 elif opcion == "📁 Categorías y Proveedores":
     st.title("📁 Categorías y Proveedores")
@@ -552,7 +672,7 @@ elif opcion == "📁 Categorías y Proveedores":
                             st.error("Contraseña de Administrador incorrecta.")
 
 # ==========================================
-# MÓDULO 4: CLIENTES Y EMPLEADOS
+# MÓDULO 5: CLIENTES Y EMPLEADOS
 # ==========================================
 elif opcion == "👥 Clientes y Empleados":
     st.title("👥 Clientes y Empleados")
@@ -660,7 +780,7 @@ elif opcion == "👥 Clientes y Empleados":
             st.warning("🔒 Solo el Administrador puede crear credenciales o eliminar cuentas de usuario.")
 
 # ==========================================
-# MÓDULO 5: HISTÓRICO DE VENTAS
+# MÓDULO 6: HISTÓRICO DE VENTAS
 # ==========================================
 elif opcion == "📊 Histórico de Ventas":
     st.title("📊 Reporte e Histórico de Ventas")
@@ -682,7 +802,7 @@ elif opcion == "📊 Histórico de Ventas":
         st.info("Aún no se han realizado ventas.")
 
 # ==========================================
-# MÓDULO 6: BITÁCORA DE AUDITORÍA (SOLO ADMIN)
+# MÓDULO 7: BITÁCORA DE AUDITORÍA (SOLO ADMIN)
 # ==========================================
 elif opcion == "📜 Bitácora de Auditoría (.LDF)":
     st.title("📜 Bitácora de Auditoría y Registro de Transacciones (.LDF)")
@@ -698,7 +818,7 @@ elif opcion == "📜 Bitácora de Auditoría (.LDF)":
     st.dataframe(df_logs, use_container_width=True)
 
 # ==========================================
-# MÓDULO 7: MODELO ENTIDAD-RELACIÓN (MER)
+# MÓDULO 8: MODELO ENTIDAD-RELACIÓN (MER)
 # ==========================================
 elif opcion == "📐 Modelo Entidad-Relación (MER)":
     st.title("📐 Diagrama Entidad - Relación (MER)")

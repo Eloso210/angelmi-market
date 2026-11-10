@@ -24,15 +24,22 @@ if "carrito" not in st.session_state:
     st.session_state.carrito = []
 
 # ==========================================
-# 3. CONEXIÓN A BASE DE DATOS POSTGRESQL (SUPABASE)
+# 3. CONEXIÓN Y CONSULTAS OPTIMIZADAS CON CACHÉ
 # ==========================================
 def get_connection():
     try:
         conn_uri = st.secrets["postgres"]["url"]
     except Exception:
         conn_uri = "postgresql://postgres.wfyyszjwcadmvwghjhqz:angelmi-market2026@aws-0-sa-east-1.pooler.supabase.com:6543/postgres"
-    
     return psycopg2.connect(conn_uri)
+
+@st.cache_data(ttl=300)
+def consultar_db(query):
+    """Ejecuta consultas de lectura y las guarda en memoria para respuesta instantánea."""
+    conn = get_connection()
+    df = pd.read_sql(query, conn)
+    conn.close()
+    return df
 
 def registrar_log(accion, detalle):
     """Registra de forma inalterable las acciones de los usuarios en la base de datos."""
@@ -48,6 +55,7 @@ def registrar_log(accion, detalle):
         conn.commit()
         cur.close()
         conn.close()
+        st.cache_data.clear()
     except Exception as e:
         print(f"Error al registrar log: {e}")
 
@@ -178,7 +186,6 @@ def verificar_base_de_datos():
 verificar_base_de_datos()
 
 def validar_clave_admin(clave_ingresada):
-    """Verifica si la contraseña pertenece a un Administrador activo."""
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("SELECT clave FROM EMPLEADO WHERE id_empleado = %s AND cargo = 'Administrador'", (st.session_state.usuario_actual['id'],))
@@ -190,7 +197,7 @@ def validar_clave_admin(clave_ingresada):
 # ==========================================
 # 4. FUNCIÓN EXCEL CON PESTAÑA DE AUDITORÍA
 # ==========================================
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def generar_reporte_excel():
     conn = get_connection()
     output = io.BytesIO()
@@ -217,7 +224,6 @@ def generar_reporte_excel():
         df_prv = pd.read_sql("SELECT * FROM PROVEEDOR", conn)
         df_prv.to_excel(writer, sheet_name='Proveedores', index=False)
         
-        # Pestaña inalterable de Log de Acciones (Auditoría estilo .LDF)
         df_log = pd.read_sql("""
             SELECT l.id_log, l.fecha, l.usuario, e.nombre as empleado, e.cargo, l.accion, l.detalle
             FROM AUDITORIA_LOG l
@@ -303,10 +309,8 @@ opcion = st.sidebar.radio("Menú de Opciones", opciones_menu)
 # ==========================================
 if opcion == "🛒 Punto de Venta (POS)":
     st.title("🛒 Punto de Venta")
-    conn = get_connection()
-    df_productos = pd.read_sql("SELECT p.id_producto, p.nombre, p.precio, p.stock, c.nombre as categoria FROM PRODUCTO p LEFT JOIN CATEGORIA c ON p.id_categoria = c.id_categoria", conn)
-    df_clientes = pd.read_sql("SELECT id_cliente, nombre FROM CLIENTE", conn)
-    conn.close()
+    df_productos = consultar_db("SELECT p.id_producto, p.nombre, p.precio, p.stock, c.nombre as categoria FROM PRODUCTO p LEFT JOIN CATEGORIA c ON p.id_categoria = c.id_categoria")
+    df_clientes = consultar_db("SELECT id_cliente, nombre FROM CLIENTE")
 
     col_izq, col_der = st.columns([1, 1])
     with col_izq:
@@ -377,9 +381,8 @@ if opcion == "🛒 Punto de Venta (POS)":
                         cur.close()
                         conn.close()
                         
-                        registrar_log("VENTA_PROCESADA", f"Venta N°{id_venta} por S/{total_venta:.2f}. Productos: {', '.join(detalles_log)}")
                         st.session_state.carrito = []
-                        st.cache_data.clear()
+                        registrar_log("VENTA_PROCESADA", f"Venta N°{id_venta} por S/{total_venta:.2f}. Productos: {', '.join(detalles_log)}")
                         st.balloons()
                         st.success(f"🎉 ¡Venta N° {id_venta} registrada con éxito!")
                         st.rerun()
@@ -397,11 +400,9 @@ if opcion == "🛒 Punto de Venta (POS)":
 # ==========================================
 elif opcion == "📦 Gestión de Productos":
     st.title("📦 Gestión de Inventario y Productos")
-    conn = get_connection()
-    df_prod = pd.read_sql("SELECT p.id_producto, p.nombre, p.precio, p.stock, c.nombre as categoria, pr.nombre as proveedor, p.fecha_registro FROM PRODUCTO p LEFT JOIN CATEGORIA c ON p.id_categoria = c.id_categoria LEFT JOIN PROVEEDOR pr ON p.id_proveedor = pr.id_proveedor ORDER BY p.id_producto DESC", conn)
-    df_cat = pd.read_sql("SELECT id_categoria, nombre FROM CATEGORIA", conn)
-    df_prov = pd.read_sql("SELECT id_proveedor, nombre FROM PROVEEDOR", conn)
-    conn.close()
+    df_prod = consultar_db("SELECT p.id_producto, p.nombre, p.precio, p.stock, c.nombre as categoria, pr.nombre as proveedor, p.fecha_registro FROM PRODUCTO p LEFT JOIN CATEGORIA c ON p.id_categoria = c.id_categoria LEFT JOIN PROVEEDOR pr ON p.id_proveedor = pr.id_proveedor ORDER BY p.id_producto DESC")
+    df_cat = consultar_db("SELECT id_categoria, nombre FROM CATEGORIA")
+    df_prov = consultar_db("SELECT id_proveedor, nombre FROM PROVEEDOR")
 
     st.subheader("Listado de Productos")
     st.dataframe(df_prod, use_container_width=True)
@@ -426,7 +427,6 @@ elif opcion == "📦 Gestión de Productos":
                         cur.close()
                         conn.close()
                         registrar_log("PRODUCTO_CREADO", f"Creación de producto: {nom} - Precio S/{pre:.2f} - Stock: {stk}")
-                        st.cache_data.clear()
                         st.success("Producto registrado exitosamente.")
                         st.rerun()
                     else:
@@ -449,7 +449,6 @@ elif opcion == "📦 Gestión de Productos":
                                 cur.close()
                                 conn.close()
                                 registrar_log("PRODUCTO_ELIMINADO", f"Eliminado producto ID {prod_elim} ({nom_p}) por el Admin.")
-                                st.cache_data.clear()
                                 st.success(f"Producto '{nom_p}' eliminado.")
                                 st.rerun()
                             except Exception:
@@ -465,10 +464,8 @@ elif opcion == "📦 Gestión de Productos":
 elif opcion == "📁 Categorías y Proveedores":
     st.title("📁 Categorías y Proveedores")
     col1, col2 = st.columns(2)
-    conn = get_connection()
-    df_cat = pd.read_sql("SELECT * FROM CATEGORIA", conn)
-    df_prov = pd.read_sql("SELECT * FROM PROVEEDOR", conn)
-    conn.close()
+    df_cat = consultar_db("SELECT * FROM CATEGORIA")
+    df_prov = consultar_db("SELECT * FROM PROVEEDOR")
 
     with col1:
         st.subheader("Categorías")
@@ -485,7 +482,6 @@ elif opcion == "📁 Categorías y Proveedores":
                     cur.close()
                     conn.close()
                     registrar_log("CATEGORIA_CREADA", f"Categoría creada: {nom_cat}")
-                    st.cache_data.clear()
                     st.success("Categoría agregada.")
                     st.rerun()
 
@@ -505,7 +501,6 @@ elif opcion == "📁 Categorías y Proveedores":
                                 cur.close()
                                 conn.close()
                                 registrar_log("CATEGORIA_ELIMINADA", f"Eliminada categoría: {nom_c}")
-                                st.cache_data.clear()
                                 st.success("Categoría eliminada.")
                                 st.rerun()
                             except Exception:
@@ -530,7 +525,6 @@ elif opcion == "📁 Categorías y Proveedores":
                     cur.close()
                     conn.close()
                     registrar_log("PROVEEDOR_CREADO", f"Proveedor creado: {nom_prv}")
-                    st.cache_data.clear()
                     st.success("Proveedor agregado.")
                     st.rerun()
 
@@ -550,7 +544,6 @@ elif opcion == "📁 Categorías y Proveedores":
                                 cur.close()
                                 conn.close()
                                 registrar_log("PROVEEDOR_ELIMINADO", f"Eliminado proveedor: {nom_pr}")
-                                st.cache_data.clear()
                                 st.success("Proveedor eliminado.")
                                 st.rerun()
                             except Exception:
@@ -564,10 +557,8 @@ elif opcion == "📁 Categorías y Proveedores":
 elif opcion == "👥 Clientes y Empleados":
     st.title("👥 Clientes y Empleados")
     col1, col2 = st.columns(2)
-    conn = get_connection()
-    df_cli = pd.read_sql("SELECT id_cliente, nombre, documento, telefono, direccion, fecha_registro FROM CLIENTE ORDER BY id_cliente DESC", conn)
-    df_emp = pd.read_sql("SELECT id_empleado, nombre, cargo, usuario, fecha_registro FROM EMPLEADO ORDER BY id_empleado DESC", conn)
-    conn.close()
+    df_cli = consultar_db("SELECT id_cliente, nombre, documento, telefono, direccion, fecha_registro FROM CLIENTE ORDER BY id_cliente DESC")
+    df_emp = consultar_db("SELECT id_empleado, nombre, cargo, usuario, fecha_registro FROM EMPLEADO ORDER BY id_empleado DESC")
 
     with col1:
         st.subheader("Clientes")
@@ -586,7 +577,6 @@ elif opcion == "👥 Clientes y Empleados":
                     cur.close()
                     conn.close()
                     registrar_log("CLIENTE_CREADO", f"Cliente creado: {nom} ({doc})")
-                    st.cache_data.clear()
                     st.success("Cliente registrado.")
                     st.rerun()
 
@@ -606,7 +596,6 @@ elif opcion == "👥 Clientes y Empleados":
                                 cur.close()
                                 conn.close()
                                 registrar_log("CLIENTE_ELIMINADO", f"Eliminado cliente: {nom_cl}")
-                                st.cache_data.clear()
                                 st.success("Cliente eliminado.")
                                 st.rerun()
                             except Exception:
@@ -618,7 +607,6 @@ elif opcion == "👥 Clientes y Empleados":
         st.subheader("Empleados (Gestión de Usuarios)")
         st.dataframe(df_emp, use_container_width=True)
         
-        # Solo el Administrador puede registrar nuevos usuarios
         if es_admin:
             with st.expander("➕ Crear Nuevo Credencial / Empleado (Admin)"):
                 with st.form("form_emp"):
@@ -636,18 +624,15 @@ elif opcion == "👥 Clientes y Empleados":
                                 cur.close()
                                 conn.close()
                                 registrar_log("USUARIO_CREADO", f"Creado credencial para {user} con rol: {cargo}")
-                                st.cache_data.clear()
                                 st.success(f"Empleado {user} registrado correctamente con rol {cargo}.")
                                 st.rerun()
-                            except Exception as e:
+                            except Exception:
                                 st.error("El nombre de usuario ya existe en el sistema.")
                         else:
                             st.warning("Todos los campos son obligatorios.")
 
-            # Solo el Administrador puede eliminar empleados
             with st.expander("🗑️ Eliminar Usuario / Empleado (Admin)"):
                 with st.form("form_del_emp"):
-                    # Filtra para evitar que el usuario activo se elimine a sí mismo por error
                     emps_disponibles = df_emp[df_emp['id_empleado'] != st.session_state.usuario_actual['id']]
                     if not emps_disponibles.empty:
                         emp_elim = st.selectbox("Seleccionar empleado a dar de baja:", options=emps_disponibles['id_empleado'].tolist(), format_func=lambda x: f"{emps_disponibles[emps_disponibles['id_empleado']==x]['nombre'].values[0]} ({emps_disponibles[emps_disponibles['id_empleado']==x]['usuario'].values[0]})")
@@ -663,7 +648,6 @@ elif opcion == "👥 Clientes y Empleados":
                                     cur.close()
                                     conn.close()
                                     registrar_log("USUARIO_ELIMINADO", f"Dado de baja el usuario {nom_e} por el Administrador.")
-                                    st.cache_data.clear()
                                     st.success(f"Usuario {nom_e} eliminado del sistema.")
                                     st.rerun()
                                 except Exception:
@@ -680,10 +664,8 @@ elif opcion == "👥 Clientes y Empleados":
 # ==========================================
 elif opcion == "📊 Histórico de Ventas":
     st.title("📊 Reporte e Histórico de Ventas")
-    conn = get_connection()
-    df_ventas = pd.read_sql("SELECT v.id_venta, v.fecha, c.nombre as cliente, e.nombre as empleado, v.total FROM VENTA v LEFT JOIN CLIENTE c ON v.id_cliente = c.id_cliente LEFT JOIN EMPLEADO e ON v.id_empleado = e.id_empleado ORDER BY v.id_venta DESC", conn)
-    df_detalles = pd.read_sql("SELECT d.id_venta, p.nombre as producto, d.cantidad, d.precio_unitario, d.subtotal FROM DETALLE_VENTA d LEFT JOIN PRODUCTO p ON d.id_producto = p.id_producto", conn)
-    conn.close()
+    df_ventas = consultar_db("SELECT v.id_venta, v.fecha, c.nombre as cliente, e.nombre as empleado, v.total FROM VENTA v LEFT JOIN CLIENTE c ON v.id_cliente = c.id_cliente LEFT JOIN EMPLEADO e ON v.id_empleado = e.id_empleado ORDER BY v.id_venta DESC")
+    df_detalles = consultar_db("SELECT d.id_venta, p.nombre as producto, d.cantidad, d.precio_unitario, d.subtotal FROM DETALLE_VENTA d LEFT JOIN PRODUCTO p ON d.id_producto = p.id_producto")
 
     m1, m2, m3 = st.columns(3)
     m1.metric("Total Ventas (S/)", f"S/ {df_ventas['total'].sum():.2f}" if not df_ventas.empty else "S/ 0.00")
@@ -706,14 +688,12 @@ elif opcion == "📜 Bitácora de Auditoría (.LDF)":
     st.title("📜 Bitácora de Auditoría y Registro de Transacciones (.LDF)")
     st.info("🔒 Registro inalterable de operaciones. Esta sección y sus registros no pueden ser eliminados ni modificados por ningún usuario.")
     
-    conn = get_connection()
-    df_logs = pd.read_sql("""
+    df_logs = consultar_db("""
         SELECT l.id_log as "ID Log", l.fecha as "Fecha/Hora", l.usuario as "Usuario", e.nombre as "Empleado", e.cargo as "Rol", l.accion as "Acción", l.detalle as "Detalle"
         FROM AUDITORIA_LOG l
         LEFT JOIN EMPLEADO e ON l.id_empleado = e.id_empleado
         ORDER BY l.id_log DESC
-    """, conn)
-    conn.close()
+    """)
 
     st.dataframe(df_logs, use_container_width=True)
 

@@ -34,7 +34,8 @@ def get_connection():
     
     return psycopg2.connect(conn_uri)
 
-def inicializar_base_de_datos():
+@st.cache_resource
+def verificar_base_de_datos():
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -99,6 +100,7 @@ def inicializar_base_de_datos():
             """
             CREATE TABLE IF NOT EXISTS DETALLE_VENTA (
                 id_detalle SERIAL PRIMARY KEY,
+                id_venta SERIAL PRIMARY KEY,
                 id_venta INT REFERENCES VENTA(id_venta),
                 id_producto INT REFERENCES PRODUCTO(id_producto),
                 cantidad INT NOT NULL,
@@ -109,7 +111,10 @@ def inicializar_base_de_datos():
         ]
 
         for q in ddl_queries:
-            cur.execute(q)
+            try:
+                cur.execute(q)
+            except Exception:
+                pass
 
         cur.execute("SELECT COUNT(*) FROM CATEGORIA;")
         if cur.fetchone()[0] == 0:
@@ -140,43 +145,28 @@ def inicializar_base_de_datos():
         conn.commit()
         cur.close()
         conn.close()
+        return True
     except Exception as e:
-        st.error(f"❌ Error conectando a la base de datos en la nube: {e}")
-        st.stop()
+        return str(e)
 
-inicializar_base_de_datos()
+verificar_base_de_datos()
 
 # ==========================================
-# 4. FUNCIÓN PARA GENERAR EXCEL MULTI-PESTAÑA
+# 4. FUNCIÓN EXCEL OPTIMIZADA (CACHEADA)
 # ==========================================
+@st.cache_data(ttl=60)
 def generar_reporte_excel():
     conn = get_connection()
     output = io.BytesIO()
     
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_v = pd.read_sql("""
-            SELECT v.id_venta, v.fecha, c.nombre as cliente, e.nombre as empleado, v.total
-            FROM VENTA v
-            LEFT JOIN CLIENTE c ON v.id_cliente = c.id_cliente
-            LEFT JOIN EMPLEADO e ON v.id_empleado = e.id_empleado
-            ORDER BY v.id_venta DESC
-        """, conn)
+        df_v = pd.read_sql("SELECT v.id_venta, v.fecha, c.nombre as cliente, e.nombre as empleado, v.total FROM VENTA v LEFT JOIN CLIENTE c ON v.id_cliente = c.id_cliente LEFT JOIN EMPLEADO e ON v.id_empleado = e.id_empleado ORDER BY v.id_venta DESC", conn)
         df_v.to_excel(writer, sheet_name='Ventas', index=False)
         
-        df_dv = pd.read_sql("""
-            SELECT d.id_detalle, d.id_venta, p.nombre as producto, d.cantidad, d.precio_unitario, d.subtotal
-            FROM DETALLE_VENTA d
-            LEFT JOIN PRODUCTO p ON d.id_producto = p.id_producto
-        """, conn)
+        df_dv = pd.read_sql("SELECT d.id_detalle, d.id_venta, p.nombre as producto, d.cantidad, d.precio_unitario, d.subtotal FROM DETALLE_VENTA d LEFT JOIN PRODUCTO p ON d.id_producto = p.id_producto", conn)
         df_dv.to_excel(writer, sheet_name='Detalle_Ventas', index=False)
         
-        df_p = pd.read_sql("""
-            SELECT p.id_producto, p.nombre, p.precio, p.stock, c.nombre as categoria, pr.nombre as proveedor, p.fecha_registro
-            FROM PRODUCTO p
-            LEFT JOIN CATEGORIA c ON p.id_categoria = c.id_categoria
-            LEFT JOIN PROVEEDOR pr ON p.id_proveedor = pr.id_proveedor
-            ORDER BY p.id_producto DESC
-        """, conn)
+        df_p = pd.read_sql("SELECT p.id_producto, p.nombre, p.precio, p.stock, c.nombre as categoria, pr.nombre as proveedor, p.fecha_registro FROM PRODUCTO p LEFT JOIN CATEGORIA c ON p.id_categoria = c.id_categoria LEFT JOIN PROVEEDOR pr ON p.id_proveedor = pr.id_proveedor ORDER BY p.id_producto DESC", conn)
         df_p.to_excel(writer, sheet_name='Productos', index=False)
         
         df_c = pd.read_sql("SELECT id_cliente, nombre, documento, telefono, direccion, fecha_registro FROM CLIENTE", conn)
@@ -291,7 +281,7 @@ if opcion == "🛒 Punto de Venta (POS)":
                             st.warning("No hay suficiente stock disponible.")
                             encontrado = True
                         break
-                if not encontrado:
+                if not strain := encontrado:
                     st.session_state.carrito.append({
                         'id_producto': int(info_prod['id_producto']),
                         'nombre': str(info_prod['nombre']),
@@ -330,6 +320,7 @@ if opcion == "🛒 Punto de Venta (POS)":
                         cur.close()
                         conn.close()
                         st.session_state.carrito = []
+                        st.cache_data.clear() # Limpia el caché del Excel al hacer una venta nueva
                         st.balloons()
                         st.success(f"🎉 ¡Venta N° {id_venta} registrada con éxito!")
                         st.rerun()
@@ -373,6 +364,7 @@ elif opcion == "📦 Gestión de Productos":
                     conn.commit()
                     cur.close()
                     conn.close()
+                    st.cache_data.clear()
                     st.success("Producto registrado exitosamente.")
                     st.rerun()
                 else:
@@ -403,6 +395,7 @@ elif opcion == "📁 Categorías y Proveedores":
                     conn.commit()
                     cur.close()
                     conn.close()
+                    st.cache_data.clear()
                     st.success("Categoría agregada.")
                     st.rerun()
 
@@ -422,6 +415,7 @@ elif opcion == "📁 Categorías y Proveedores":
                     conn.commit()
                     cur.close()
                     conn.close()
+                    st.cache_data.clear()
                     st.success("Proveedor agregado.")
                     st.rerun()
 
@@ -452,6 +446,7 @@ elif opcion == "👥 Clientes y Empleados":
                     conn.commit()
                     cur.close()
                     conn.close()
+                    st.cache_data.clear()
                     st.success("Cliente registrado.")
                     st.rerun()
 
@@ -472,6 +467,7 @@ elif opcion == "👥 Clientes y Empleados":
                         conn.commit()
                         cur.close()
                         conn.close()
+                        st.cache_data.clear()
                         st.success("Empleado registrado.")
                         st.rerun()
                     except Exception as e:
@@ -483,18 +479,8 @@ elif opcion == "👥 Clientes y Empleados":
 elif opcion == "📊 Histórico de Ventas":
     st.title("📊 Reporte e Histórico de Ventas")
     conn = get_connection()
-    df_ventas = pd.read_sql("""
-        SELECT v.id_venta, v.fecha, c.nombre as cliente, e.nombre as empleado, v.total
-        FROM VENTA v
-        LEFT JOIN CLIENTE c ON v.id_cliente = c.id_cliente
-        LEFT JOIN EMPLEADO e ON v.id_empleado = e.id_empleado
-        ORDER BY v.id_venta DESC
-    """, conn)
-    df_detalles = pd.read_sql("""
-        SELECT d.id_venta, p.nombre as producto, d.cantidad, d.precio_unitario, d.subtotal
-        FROM DETALLE_VENTA d
-        LEFT JOIN PRODUCTO p ON d.id_producto = p.id_producto
-    """, conn)
+    df_ventas = pd.read_sql("SELECT v.id_venta, v.fecha, c.nombre as cliente, e.nombre as empleado, v.total FROM VENTA v LEFT JOIN CLIENTE c ON v.id_cliente = c.id_cliente LEFT JOIN EMPLEADO e ON v.id_empleado = e.id_empleado ORDER BY v.id_venta DESC", conn)
+    df_detalles = pd.read_sql("SELECT d.id_venta, p.nombre as producto, d.cantidad, d.precio_unitario, d.subtotal FROM DETALLE_VENTA d LEFT JOIN PRODUCTO p ON d.id_producto = p.id_producto", conn)
     conn.close()
 
     m1, m2, m3 = st.columns(3)

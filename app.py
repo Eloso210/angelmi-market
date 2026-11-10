@@ -100,7 +100,6 @@ def verificar_base_de_datos():
             """
             CREATE TABLE IF NOT EXISTS DETALLE_VENTA (
                 id_detalle SERIAL PRIMARY KEY,
-                id_venta SERIAL PRIMARY KEY,
                 id_venta INT REFERENCES VENTA(id_venta),
                 id_producto INT REFERENCES PRODUCTO(id_producto),
                 cantidad INT NOT NULL,
@@ -281,7 +280,7 @@ if opcion == "🛒 Punto de Venta (POS)":
                             st.warning("No hay suficiente stock disponible.")
                             encontrado = True
                         break
-                if not strain := encontrado:
+                if not encontrado:
                     st.session_state.carrito.append({
                         'id_producto': int(info_prod['id_producto']),
                         'nombre': str(info_prod['nombre']),
@@ -320,7 +319,7 @@ if opcion == "🛒 Punto de Venta (POS)":
                         cur.close()
                         conn.close()
                         st.session_state.carrito = []
-                        st.cache_data.clear() # Limpia el caché del Excel al hacer una venta nueva
+                        st.cache_data.clear()
                         st.balloons()
                         st.success(f"🎉 ¡Venta N° {id_venta} registrada con éxito!")
                         st.rerun()

@@ -34,6 +34,23 @@ def get_connection():
     
     return psycopg2.connect(conn_uri)
 
+def registrar_log(accion, detalle):
+    """Registra de forma inalterable las acciones de los usuarios en la base de datos."""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        emp_id = st.session_state.usuario_actual['id'] if st.session_state.usuario_actual else None
+        usr = st.session_state.usuario_actual['usuario'] if st.session_state.usuario_actual else 'SISTEMA'
+        cur.execute(
+            "INSERT INTO AUDITORIA_LOG (id_empleado, usuario, accion, detalle) VALUES (%s, %s, %s, %s);",
+            (emp_id, usr, accion, detalle)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"Error al registrar log: {e}")
+
 @st.cache_resource
 def verificar_base_de_datos():
     try:
@@ -106,6 +123,16 @@ def verificar_base_de_datos():
                 precio_unitario NUMERIC(10,2) NOT NULL,
                 subtotal NUMERIC(10,2) NOT NULL
             );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS AUDITORIA_LOG (
+                id_log SERIAL PRIMARY KEY,
+                fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                id_empleado INT REFERENCES EMPLEADO(id_empleado),
+                usuario VARCHAR(50),
+                accion VARCHAR(100),
+                detalle TEXT
+            );
             """
         ]
 
@@ -150,8 +177,18 @@ def verificar_base_de_datos():
 
 verificar_base_de_datos()
 
+def validar_clave_admin(clave_ingresada):
+    """Verifica si la contraseña pertenece a un Administrador activo."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT clave FROM EMPLEADO WHERE id_empleado = %s AND cargo = 'Administrador'", (st.session_state.usuario_actual['id'],))
+    res = cur.fetchone()
+    cur.close()
+    conn.close()
+    return res and res[0] == clave_ingresada
+
 # ==========================================
-# 4. FUNCIÓN EXCEL OPTIMIZADA (CACHEADA)
+# 4. FUNCIÓN EXCEL CON PESTAÑA DE AUDITORÍA
 # ==========================================
 @st.cache_data(ttl=60)
 def generar_reporte_excel():
@@ -180,6 +217,15 @@ def generar_reporte_excel():
         df_prv = pd.read_sql("SELECT * FROM PROVEEDOR", conn)
         df_prv.to_excel(writer, sheet_name='Proveedores', index=False)
         
+        # Pestaña inalterable de Log de Acciones (Auditoría estilo .LDF)
+        df_log = pd.read_sql("""
+            SELECT l.id_log, l.fecha, l.usuario, e.nombre as empleado, e.cargo, l.accion, l.detalle
+            FROM AUDITORIA_LOG l
+            LEFT JOIN EMPLEADO e ON l.id_empleado = e.id_empleado
+            ORDER BY l.id_log DESC
+        """, conn)
+        df_log.to_excel(writer, sheet_name='Log_Acciones', index=False)
+        
     conn.close()
     return output.getvalue()
 
@@ -189,7 +235,7 @@ def generar_reporte_excel():
 def validar_login(usuario, clave):
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT id_empleado, nombre, cargo FROM EMPLEADO WHERE usuario = %s AND clave = %s", (usuario, clave))
+    cur.execute("SELECT id_empleado, nombre, cargo, usuario FROM EMPLEADO WHERE usuario = %s AND clave = %s", (usuario, clave))
     res = cur.fetchone()
     cur.close()
     conn.close()
@@ -207,7 +253,13 @@ if not st.session_state.autenticado:
                 user_data = validar_login(user_input, pass_input)
                 if user_data:
                     st.session_state.autenticado = True
-                    st.session_state.usuario_actual = {"id": user_data[0], "nombre": user_data[1], "cargo": user_data[2]}
+                    st.session_state.usuario_actual = {
+                        "id": user_data[0],
+                        "nombre": user_data[1],
+                        "cargo": user_data[2],
+                        "usuario": user_data[3]
+                    }
+                    registrar_log("INICIO_SESION", f"El usuario {user_data[3]} ({user_data[2]}) inició sesión.")
                     st.success(f"Bienvenido {user_data[1]}")
                     st.rerun()
                 else:
@@ -218,9 +270,11 @@ if not st.session_state.autenticado:
 # 6. BARRA LATERAL Y NAVEGACIÓN
 # ==========================================
 st.sidebar.title("🏪 Angelmi Market")
+es_admin = st.session_state.usuario_actual['cargo'] == "Administrador"
 st.sidebar.caption(f"👤 Conectado: **{st.session_state.usuario_actual['nombre']}** ({st.session_state.usuario_actual['cargo']})")
 
 if st.sidebar.button("🚪 Cerrar Sesión"):
+    registrar_log("CIERRE_SESION", f"El usuario {st.session_state.usuario_actual['usuario']} cerró sesión.")
     st.session_state.autenticado = False
     st.session_state.usuario_actual = None
     st.session_state.carrito = []
@@ -238,10 +292,11 @@ st.sidebar.download_button(
 
 st.sidebar.divider()
 
-opcion = st.sidebar.radio(
-    "Menú de Opciones",
-    ["🛒 Punto de Venta (POS)", "📦 Gestión de Productos", "📁 Categorías y Proveedores", "👥 Clientes y Empleados", "📊 Histórico de Ventas", "📐 Modelo Entidad-Relación (MER)"]
-)
+opciones_menu = ["🛒 Punto de Venta (POS)", "📦 Gestión de Productos", "📁 Categorías y Proveedores", "👥 Clientes y Empleados", "📊 Histórico de Ventas", "📐 Modelo Entidad-Relación (MER)"]
+if es_admin:
+    opciones_menu.append("📜 Bitácora de Auditoría (.LDF)")
+
+opcion = st.sidebar.radio("Menú de Opciones", opciones_menu)
 
 # ==========================================
 # MÓDULO 1: POS
@@ -311,13 +366,18 @@ if opcion == "🛒 Punto de Venta (POS)":
                                     (id_cli, st.session_state.usuario_actual['id'], total_venta))
                         id_venta = cur.fetchone()[0]
                         
+                        detalles_log = []
                         for item in st.session_state.carrito:
                             cur.execute("INSERT INTO DETALLE_VENTA (id_venta, id_producto, cantidad, precio_unitario, subtotal) VALUES (%s, %s, %s, %s, %s);",
                                         (id_venta, item['id_producto'], item['cantidad'], item['precio'], item['subtotal']))
                             cur.execute("UPDATE PRODUCTO SET stock = stock - %s WHERE id_producto = %s;", (item['cantidad'], item['id_producto']))
+                            detalles_log.append(f"{item['nombre']} (x{item['cantidad']})")
+                            
                         conn.commit()
                         cur.close()
                         conn.close()
+                        
+                        registrar_log("VENTA_PROCESADA", f"Venta N°{id_venta} por S/{total_venta:.2f}. Productos: {', '.join(detalles_log)}")
                         st.session_state.carrito = []
                         st.cache_data.clear()
                         st.balloons()
@@ -343,31 +403,61 @@ elif opcion == "📦 Gestión de Productos":
     df_prov = pd.read_sql("SELECT id_proveedor, nombre FROM PROVEEDOR", conn)
     conn.close()
 
-    st.subheader("Listado de Productos en Sistema")
+    st.subheader("Listado de Productos")
     st.dataframe(df_prod, use_container_width=True)
 
-    with st.expander("➕ Registrar Nuevo Producto"):
-        with st.form("form_nuevo_prod"):
-            nom = st.text_input("Nombre del Producto")
-            pre = st.number_input("Precio (S/)", min_value=0.1, value=1.0, step=0.5)
-            stk = st.number_input("Stock Inicial", min_value=1, value=10, step=1)
-            cat = st.selectbox("Categoría", options=df_cat['id_categoria'].tolist(), format_func=lambda x: df_cat[df_cat['id_categoria']==x]['nombre'].values[0])
-            prv = st.selectbox("Proveedor", options=df_prov['id_proveedor'].tolist(), format_func=lambda x: df_prov[df_prov['id_proveedor']==x]['nombre'].values[0])
-            
-            if st.form_submit_button("Guardar Producto"):
-                if nom:
-                    conn = get_connection()
-                    cur = conn.cursor()
-                    cur.execute("INSERT INTO PRODUCTO (nombre, precio, stock, id_categoria, id_proveedor) VALUES (%s, %s, %s, %s, %s)",
-                                (nom, pre, stk, cat, prv))
-                    conn.commit()
-                    cur.close()
-                    conn.close()
-                    st.cache_data.clear()
-                    st.success("Producto registrado exitosamente.")
-                    st.rerun()
-                else:
-                    st.warning("El nombre del producto es obligatorio.")
+    col_add, col_del = st.columns(2)
+    with col_add:
+        with st.expander("➕ Registrar Nuevo Producto"):
+            with st.form("form_nuevo_prod"):
+                nom = st.text_input("Nombre del Producto")
+                pre = st.number_input("Precio (S/)", min_value=0.1, value=1.0, step=0.5)
+                stk = st.number_input("Stock Inicial", min_value=1, value=10, step=1)
+                cat = st.selectbox("Categoría", options=df_cat['id_categoria'].tolist(), format_func=lambda x: df_cat[df_cat['id_categoria']==x]['nombre'].values[0])
+                prv = st.selectbox("Proveedor", options=df_prov['id_proveedor'].tolist(), format_func=lambda x: df_prov[df_prov['id_proveedor']==x]['nombre'].values[0])
+                
+                if st.form_submit_button("Guardar Producto"):
+                    if nom:
+                        conn = get_connection()
+                        cur = conn.cursor()
+                        cur.execute("INSERT INTO PRODUCTO (nombre, precio, stock, id_categoria, id_proveedor) VALUES (%s, %s, %s, %s, %s)",
+                                    (nom, pre, stk, cat, prv))
+                        conn.commit()
+                        cur.close()
+                        conn.close()
+                        registrar_log("PRODUCTO_CREADO", f"Creación de producto: {nom} - Precio S/{pre:.2f} - Stock: {stk}")
+                        st.cache_data.clear()
+                        st.success("Producto registrado exitosamente.")
+                        st.rerun()
+                    else:
+                        st.warning("El nombre del producto es obligatorio.")
+
+    with col_del:
+        if es_admin:
+            with st.expander("🗑️ Eliminar Producto (Solo Admin)"):
+                with st.form("form_elim_prod"):
+                    prod_elim = st.selectbox("Seleccionar producto a eliminar:", options=df_prod['id_producto'].tolist(), format_func=lambda x: df_prod[df_prod['id_producto']==x]['nombre'].values[0] if not df_prod.empty else "N/A")
+                    pass_confirm = st.text_input("Confirmar con Contraseña de Admin:", type="password")
+                    if st.form_submit_button("❌ Eliminar Producto Definitivamente"):
+                        if validar_clave_admin(pass_confirm):
+                            try:
+                                conn = get_connection()
+                                cur = conn.cursor()
+                                nom_p = df_prod[df_prod['id_producto']==prod_elim]['nombre'].values[0]
+                                cur.execute("DELETE FROM PRODUCTO WHERE id_producto = %s", (prod_elim,))
+                                conn.commit()
+                                cur.close()
+                                conn.close()
+                                registrar_log("PRODUCTO_ELIMINADO", f"Eliminado producto ID {prod_elim} ({nom_p}) por el Admin.")
+                                st.cache_data.clear()
+                                st.success(f"Producto '{nom_p}' eliminado.")
+                                st.rerun()
+                            except Exception:
+                                st.error("No se puede eliminar un producto que ya tiene ventas asociadas en el historial.")
+                        else:
+                            st.error("Contraseña de administrador incorrecta.")
+        else:
+            st.info("🔒 La opción de eliminar productos requiere permisos de Administrador.")
 
 # ==========================================
 # MÓDULO 3: CATEGORÍAS Y PROVEEDORES
@@ -394,9 +484,34 @@ elif opcion == "📁 Categorías y Proveedores":
                     conn.commit()
                     cur.close()
                     conn.close()
+                    registrar_log("CATEGORIA_CREADA", f"Categoría creada: {nom_cat}")
                     st.cache_data.clear()
                     st.success("Categoría agregada.")
                     st.rerun()
+
+        if es_admin and not df_cat.empty:
+            with st.expander("🗑️ Eliminar Categoría (Admin)"):
+                with st.form("form_del_cat"):
+                    cat_elim = st.selectbox("Categoría a eliminar:", options=df_cat['id_categoria'].tolist(), format_func=lambda x: df_cat[df_cat['id_categoria']==x]['nombre'].values[0])
+                    pass_admin_cat = st.text_input("Contraseña de Admin:", type="password")
+                    if st.form_submit_button("Eliminar Categoría"):
+                        if validar_clave_admin(pass_admin_cat):
+                            try:
+                                conn = get_connection()
+                                cur = conn.cursor()
+                                nom_c = df_cat[df_cat['id_categoria']==cat_elim]['nombre'].values[0]
+                                cur.execute("DELETE FROM CATEGORIA WHERE id_categoria = %s", (cat_elim,))
+                                conn.commit()
+                                cur.close()
+                                conn.close()
+                                registrar_log("CATEGORIA_ELIMINADA", f"Eliminada categoría: {nom_c}")
+                                st.cache_data.clear()
+                                st.success("Categoría eliminada.")
+                                st.rerun()
+                            except Exception:
+                                st.error("No se puede eliminar una categoría asignada a productos existentes.")
+                        else:
+                            st.error("Contraseña de Administrador incorrecta.")
 
     with col2:
         st.subheader("Proveedores")
@@ -414,9 +529,34 @@ elif opcion == "📁 Categorías y Proveedores":
                     conn.commit()
                     cur.close()
                     conn.close()
+                    registrar_log("PROVEEDOR_CREADO", f"Proveedor creado: {nom_prv}")
                     st.cache_data.clear()
                     st.success("Proveedor agregado.")
                     st.rerun()
+
+        if es_admin and not df_prov.empty:
+            with st.expander("🗑️ Eliminar Proveedor (Admin)"):
+                with st.form("form_del_prov"):
+                    prov_elim = st.selectbox("Proveedor a eliminar:", options=df_prov['id_proveedor'].tolist(), format_func=lambda x: df_prov[df_prov['id_proveedor']==x]['nombre'].values[0])
+                    pass_admin_prv = st.text_input("Contraseña de Admin:", type="password", key="pass_prv")
+                    if st.form_submit_button("Eliminar Proveedor"):
+                        if validar_clave_admin(pass_admin_prv):
+                            try:
+                                conn = get_connection()
+                                cur = conn.cursor()
+                                nom_pr = df_prov[df_prov['id_proveedor']==prov_elim]['nombre'].values[0]
+                                cur.execute("DELETE FROM PROVEEDOR WHERE id_proveedor = %s", (prov_elim,))
+                                conn.commit()
+                                cur.close()
+                                conn.close()
+                                registrar_log("PROVEEDOR_ELIMINADO", f"Eliminado proveedor: {nom_pr}")
+                                st.cache_data.clear()
+                                st.success("Proveedor eliminado.")
+                                st.rerun()
+                            except Exception:
+                                st.error("No se puede eliminar un proveedor asignado a productos existentes.")
+                        else:
+                            st.error("Contraseña de Administrador incorrecta.")
 
 # ==========================================
 # MÓDULO 4: CLIENTES Y EMPLEADOS
@@ -445,32 +585,95 @@ elif opcion == "👥 Clientes y Empleados":
                     conn.commit()
                     cur.close()
                     conn.close()
+                    registrar_log("CLIENTE_CREADO", f"Cliente creado: {nom} ({doc})")
                     st.cache_data.clear()
                     st.success("Cliente registrado.")
                     st.rerun()
 
+        if es_admin and not df_cli.empty:
+            with st.expander("🗑️ Eliminar Cliente (Admin)"):
+                with st.form("form_del_cli"):
+                    cli_elim = st.selectbox("Cliente a eliminar:", options=df_cli['id_cliente'].tolist(), format_func=lambda x: df_cli[df_cli['id_cliente']==x]['nombre'].values[0])
+                    pass_admin_cli = st.text_input("Contraseña de Admin:", type="password", key="pass_cli")
+                    if st.form_submit_button("Eliminar Cliente"):
+                        if validar_clave_admin(pass_admin_cli):
+                            try:
+                                conn = get_connection()
+                                cur = conn.cursor()
+                                nom_cl = df_cli[df_cli['id_cliente']==cli_elim]['nombre'].values[0]
+                                cur.execute("DELETE FROM CLIENTE WHERE id_cliente = %s", (cli_elim,))
+                                conn.commit()
+                                cur.close()
+                                conn.close()
+                                registrar_log("CLIENTE_ELIMINADO", f"Eliminado cliente: {nom_cl}")
+                                st.cache_data.clear()
+                                st.success("Cliente eliminado.")
+                                st.rerun()
+                            except Exception:
+                                st.error("No se puede eliminar un cliente con ventas registradas.")
+                        else:
+                            st.error("Contraseña de Administrador incorrecta.")
+
     with col2:
-        st.subheader("Empleados")
+        st.subheader("Empleados (Gestión de Usuarios)")
         st.dataframe(df_emp, use_container_width=True)
-        with st.form("form_emp"):
-            nom_emp = st.text_input("Nombre del Empleado")
-            cargo = st.selectbox("Cargo", ["Administrador", "Cajero", "Almacenero"])
-            user = st.text_input("Usuario")
-            passw = st.text_input("Contraseña", type="password")
-            if st.form_submit_button("Registrar Empleado"):
-                if nom_emp and user:
-                    try:
-                        conn = get_connection()
-                        cur = conn.cursor()
-                        cur.execute("INSERT INTO EMPLEADO (nombre, cargo, usuario, clave) VALUES (%s, %s, %s, %s)", (nom_emp, cargo, user, passw))
-                        conn.commit()
-                        cur.close()
-                        conn.close()
-                        st.cache_data.clear()
-                        st.success("Empleado registrado.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error("El usuario ya existe o hubo un error al registrar.")
+        
+        # Solo el Administrador puede registrar nuevos usuarios
+        if es_admin:
+            with st.expander("➕ Crear Nuevo Credencial / Empleado (Admin)"):
+                with st.form("form_emp"):
+                    nom_emp = st.text_input("Nombre del Empleado")
+                    cargo = st.selectbox("Asignar Rol / Permisos", ["Cajero", "Almacenero", "Administrador"])
+                    user = st.text_input("Usuario")
+                    passw = st.text_input("Contraseña", type="password")
+                    if st.form_submit_button("Crear Credencial"):
+                        if nom_emp and user and passw:
+                            try:
+                                conn = get_connection()
+                                cur = conn.cursor()
+                                cur.execute("INSERT INTO EMPLEADO (nombre, cargo, usuario, clave) VALUES (%s, %s, %s, %s)", (nom_emp, cargo, user, passw))
+                                conn.commit()
+                                cur.close()
+                                conn.close()
+                                registrar_log("USUARIO_CREADO", f"Creado credencial para {user} con rol: {cargo}")
+                                st.cache_data.clear()
+                                st.success(f"Empleado {user} registrado correctamente con rol {cargo}.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error("El nombre de usuario ya existe en el sistema.")
+                        else:
+                            st.warning("Todos los campos son obligatorios.")
+
+            # Solo el Administrador puede eliminar empleados
+            with st.expander("🗑️ Eliminar Usuario / Empleado (Admin)"):
+                with st.form("form_del_emp"):
+                    # Filtra para evitar que el usuario activo se elimine a sí mismo por error
+                    emps_disponibles = df_emp[df_emp['id_empleado'] != st.session_state.usuario_actual['id']]
+                    if not emps_disponibles.empty:
+                        emp_elim = st.selectbox("Seleccionar empleado a dar de baja:", options=emps_disponibles['id_empleado'].tolist(), format_func=lambda x: f"{emps_disponibles[emps_disponibles['id_empleado']==x]['nombre'].values[0]} ({emps_disponibles[emps_disponibles['id_empleado']==x]['usuario'].values[0]})")
+                        pass_admin_emp = st.text_input("Contraseña de Admin actual:", type="password", key="pass_emp")
+                        if st.form_submit_button("Dar de Baja Empleado"):
+                            if validar_clave_admin(pass_admin_emp):
+                                try:
+                                    conn = get_connection()
+                                    cur = conn.cursor()
+                                    nom_e = emps_disponibles[emps_disponibles['id_empleado']==emp_elim]['usuario'].values[0]
+                                    cur.execute("DELETE FROM EMPLEADO WHERE id_empleado = %s", (emp_elim,))
+                                    conn.commit()
+                                    cur.close()
+                                    conn.close()
+                                    registrar_log("USUARIO_ELIMINADO", f"Dado de baja el usuario {nom_e} por el Administrador.")
+                                    st.cache_data.clear()
+                                    st.success(f"Usuario {nom_e} eliminado del sistema.")
+                                    st.rerun()
+                                except Exception:
+                                    st.error("No se puede eliminar un empleado que ya figura en registros de ventas u operaciones.")
+                            else:
+                                st.error("Contraseña de Administrador incorrecta.")
+                    else:
+                        st.info("No hay otros usuarios disponibles para eliminar.")
+        else:
+            st.warning("🔒 Solo el Administrador puede crear credenciales o eliminar cuentas de usuario.")
 
 # ==========================================
 # MÓDULO 5: HISTÓRICO DE VENTAS
@@ -497,11 +700,29 @@ elif opcion == "📊 Histórico de Ventas":
         st.info("Aún no se han realizado ventas.")
 
 # ==========================================
-# MÓDULO 6: MODELO ENTIDAD-RELACIÓN (MER)
+# MÓDULO 6: BITÁCORA DE AUDITORÍA (SOLO ADMIN)
+# ==========================================
+elif opcion == "📜 Bitácora de Auditoría (.LDF)":
+    st.title("📜 Bitácora de Auditoría y Registro de Transacciones (.LDF)")
+    st.info("🔒 Registro inalterable de operaciones. Esta sección y sus registros no pueden ser eliminados ni modificados por ningún usuario.")
+    
+    conn = get_connection()
+    df_logs = pd.read_sql("""
+        SELECT l.id_log as "ID Log", l.fecha as "Fecha/Hora", l.usuario as "Usuario", e.nombre as "Empleado", e.cargo as "Rol", l.accion as "Acción", l.detalle as "Detalle"
+        FROM AUDITORIA_LOG l
+        LEFT JOIN EMPLEADO e ON l.id_empleado = e.id_empleado
+        ORDER BY l.id_log DESC
+    """, conn)
+    conn.close()
+
+    st.dataframe(df_logs, use_container_width=True)
+
+# ==========================================
+# MÓDULO 7: MODELO ENTIDAD-RELACIÓN (MER)
 # ==========================================
 elif opcion == "📐 Modelo Entidad-Relación (MER)":
     st.title("📐 Diagrama Entidad - Relación (MER)")
-    st.markdown("Representación relacional completa de la base de datos **AngelmiMarketDB**.")
+    st.markdown("Representación relacional completa de la base de datos **AngelmiMarketDB** incluyendo la tabla de Auditoría.")
     
     graphviz_code = """
     digraph MER {
@@ -512,10 +733,11 @@ elif opcion == "📐 Modelo Entidad-Relación (MER)":
         CATEGORIA [label="CATEGORIA\\n- id_categoria (PK)\\n- nombre\\n- descripcion"];
         PROVEEDOR [label="PROVEEDOR\\n- id_proveedor (PK)\\n- nombre\\n- ruc_dni\\n- telefono\\n- email"];
         CLIENTE [label="CLIENTE\\n- id_cliente (PK)\\n- nombre\\n- documento\\n- fecha_registro"];
-        EMPLEADO [label="EMPLEADO\\n- id_empleado (PK)\\n- nombre\\n- usuario\\n- clave\\n- fecha_registro"];
+        EMPLEADO [label="EMPLEADO\\n- id_empleado (PK)\\n- nombre\\n- cargo\\n- usuario\\n- clave\\n- fecha_registro"];
         PRODUCTO [label="PRODUCTO\\n- id_producto (PK)\\n- nombre\\n- precio\\n- stock\\n- id_categoria (FK)\\n- id_proveedor (FK)\\n- fecha_registro"];
         VENTA [label="VENTA\\n- id_venta (PK)\\n- fecha\\n- id_cliente (FK)\\n- id_empleado (FK)\\n- total"];
         DETALLE_VENTA [label="DETALLE_VENTA\\n- id_detalle (PK)\\n- id_venta (FK)\\n- id_producto (FK)\\n- cantidad\\n- precio_unitario\\n- subtotal"];
+        AUDITORIA_LOG [label="AUDITORIA_LOG\\n- id_log (PK)\\n- fecha\\n- id_empleado (FK)\\n- usuario\\n- accion\\n- detalle"];
 
         CATEGORIA -> PRODUCTO [label="1 : N"];
         PROVEEDOR -> PRODUCTO [label="1 : N"];
@@ -523,6 +745,7 @@ elif opcion == "📐 Modelo Entidad-Relación (MER)":
         VENTA -> DETALLE_VENTA [label="1 : N"];
         CLIENTE -> VENTA [label="1 : N"];
         EMPLEADO -> VENTA [label="1 : N"];
+        EMPLEADO -> AUDITORIA_LOG [label="1 : N"];
     }
     """
     st.graphviz_chart(graphviz_code)

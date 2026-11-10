@@ -1,6 +1,7 @@
 import streamlit as st
-import pyodbc
+import psycopg2
 import pandas as pd
+import io
 from datetime import datetime
 
 # ==========================================
@@ -23,189 +24,185 @@ if "carrito" not in st.session_state:
     st.session_state.carrito = []
 
 # ==========================================
-# 3. MOTOR DE CONEXIÓN Y AUTO-INICIALIZACIÓN DDL / DML
+# 3. CONEXIÓN A BASE DE DATOS POSTGRESQL (SUPABASE)
 # ==========================================
-def obtener_driver():
-    drivers = pyodbc.drivers()
-    if "ODBC Driver 18 for SQL Server" in drivers:
-        return "ODBC Driver 18 for SQL Server"
-    elif "ODBC Driver 17 for SQL Server" in drivers:
-        return "ODBC Driver 17 for SQL Server"
-    return "SQL Server"
-
-def conectar_servidor():
-    driver = obtener_driver()
-    trust = ";TrustServerCertificate=yes" if "Driver 1" in driver else ""
-    servidores = [r"(localdb)\MSSQLLocalDB", r".\SQLEXPRESS", "localhost", "127.0.0.1"]
+def get_connection():
+    try:
+        conn_uri = st.secrets["postgres"]["url"]
+    except Exception:
+        conn_uri = "postgresql://postgres.wfyyszjwcadmvwghjhqz:angelmi-market2026@aws-0-sa-east-1.pooler.supabase.com:6543/postgres"
     
-    for srv in servidores:
-        try:
-            conn_str = f"DRIVER={{{driver}}};SERVER={srv};DATABASE=master;Trusted_Connection=yes{trust};"
-            conn = pyodbc.connect(conn_str, autocommit=True, timeout=5)
-            return conn, srv, driver, trust
-        except Exception:
-            continue
-    return None, None, None, None
+    return psycopg2.connect(conn_uri)
 
 def inicializar_base_de_datos():
-    conn_master, srv, driver, trust = conectar_servidor()
-    if not conn_master:
-        st.error("❌ No se pudo conectar al servidor de SQL Server o LocalDB.")
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+
+        ddl_queries = [
+            """
+            CREATE TABLE IF NOT EXISTS CATEGORIA (
+                id_categoria SERIAL PRIMARY KEY,
+                nombre VARCHAR(100) NOT NULL,
+                descripcion VARCHAR(255)
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS PROVEEDOR (
+                id_proveedor SERIAL PRIMARY KEY,
+                nombre VARCHAR(100) NOT NULL,
+                ruc_dni VARCHAR(20),
+                telefono VARCHAR(20),
+                email VARCHAR(100)
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS CLIENTE (
+                id_cliente SERIAL PRIMARY KEY,
+                nombre VARCHAR(100) NOT NULL,
+                documento VARCHAR(20),
+                telefono VARCHAR(20),
+                direccion VARCHAR(200),
+                fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS EMPLEADO (
+                id_empleado SERIAL PRIMARY KEY,
+                nombre VARCHAR(100) NOT NULL,
+                cargo VARCHAR(50),
+                usuario VARCHAR(50) UNIQUE,
+                clave VARCHAR(50),
+                fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS PRODUCTO (
+                id_producto SERIAL PRIMARY KEY,
+                nombre VARCHAR(100) NOT NULL,
+                precio NUMERIC(10,2) NOT NULL,
+                stock INT NOT NULL,
+                id_categoria INT REFERENCES CATEGORIA(id_categoria),
+                id_proveedor INT REFERENCES PROVEEDOR(id_proveedor),
+                fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS VENTA (
+                id_venta SERIAL PRIMARY KEY,
+                fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                id_cliente INT REFERENCES CLIENTE(id_cliente),
+                id_empleado INT REFERENCES EMPLEADO(id_empleado),
+                total NUMERIC(10,2) NOT NULL
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS DETALLE_VENTA (
+                id_detalle SERIAL PRIMARY KEY,
+                id_venta INT REFERENCES VENTA(id_venta),
+                id_producto INT REFERENCES PRODUCTO(id_producto),
+                cantidad INT NOT NULL,
+                precio_unitario NUMERIC(10,2) NOT NULL,
+                subtotal NUMERIC(10,2) NOT NULL
+            );
+            """
+        ]
+
+        for q in ddl_queries:
+            cur.execute(q)
+
+        cur.execute("SELECT COUNT(*) FROM CATEGORIA;")
+        if cur.fetchone()[0] == 0:
+            cur.execute("INSERT INTO CATEGORIA (nombre, descripcion) VALUES ('Abarrotes', 'Productos de primera necesidad'), ('Bebidas', 'Gaseosas y jugos'), ('Lácteos', 'Leche, quesos y yogur'), ('Limpieza', 'Artículos para el hogar');")
+
+        cur.execute("SELECT COUNT(*) FROM PROVEEDOR;")
+        if cur.fetchone()[0] == 0:
+            cur.execute("INSERT INTO PROVEEDOR (nombre, ruc_dni, telefono, email) VALUES ('Distribuidora Central S.A.C.', '20123456789', '987654321', 'ventas@distribuidora.pe'), ('Comercial San Juan', '20987654321', '912345678', 'contacto@sanjuan.pe');")
+
+        cur.execute("SELECT COUNT(*) FROM CLIENTE;")
+        if cur.fetchone()[0] == 0:
+            cur.execute("INSERT INTO CLIENTE (nombre, documento, telefono, direccion) VALUES ('Público General', '00000000', '000000000', 'Tienda Local'), ('Juan Pérez', '45678912', '998877665', 'Av. Central 123');")
+
+        cur.execute("SELECT COUNT(*) FROM EMPLEADO;")
+        if cur.fetchone()[0] == 0:
+            cur.execute("INSERT INTO EMPLEADO (nombre, cargo, usuario, clave) VALUES ('Admin Angelmi', 'Administrador', 'admin', 'admin123'), ('Cajero 1', 'Cajero', 'cajero1', '1234');")
+
+        cur.execute("SELECT COUNT(*) FROM PRODUCTO;")
+        if cur.fetchone()[0] == 0:
+            cur.execute("""
+                INSERT INTO PRODUCTO (nombre, precio, stock, id_categoria, id_proveedor) VALUES 
+                ('Arroz Extra 1kg', 4.50, 50, 1, 1),
+                ('Aceite Vegetal 1L', 8.20, 30, 1, 1),
+                ('Leche Evaporada 400g', 3.80, 40, 3, 2),
+                ('Inca Kola 1.5L', 6.50, 25, 2, 2);
+            """)
+
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        st.error(f"❌ Error conectando a la base de datos en la nube: {e}")
         st.stop()
-        
-    cursor = conn_master.cursor()
-    cursor.execute("""
-        IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'AngelmiMarketDB')
-        BEGIN
-            CREATE DATABASE AngelmiMarketDB;
-        END
-    """)
-    conn_master.close()
 
-    conn_str_db = f"DRIVER={{{driver}}};SERVER={srv};DATABASE=AngelmiMarketDB;Trusted_Connection=yes{trust};"
-    conn_db = pyodbc.connect(conn_str_db, autocommit=True)
-    cursor_db = conn_db.cursor()
-
-    # DDL Tablas con timestamps
-    ddl_queries = [
-        """
-        IF OBJECT_ID('CATEGORIA', 'U') IS NULL
-        CREATE TABLE CATEGORIA (
-            id_categoria INT IDENTITY(1,1) PRIMARY KEY,
-            nombre VARCHAR(100) NOT NULL,
-            descripcion VARCHAR(255)
-        );
-        """,
-        """
-        IF OBJECT_ID('PROVEEDOR', 'U') IS NULL
-        CREATE TABLE PROVEEDOR (
-            id_proveedor INT IDENTITY(1,1) PRIMARY KEY,
-            nombre VARCHAR(100) NOT NULL,
-            ruc_dni VARCHAR(20),
-            telefono VARCHAR(20),
-            email VARCHAR(100)
-        );
-        """,
-        """
-        IF OBJECT_ID('CLIENTE', 'U') IS NULL
-        CREATE TABLE CLIENTE (
-            id_cliente INT IDENTITY(1,1) PRIMARY KEY,
-            nombre VARCHAR(100) NOT NULL,
-            documento VARCHAR(20),
-            telefono VARCHAR(20),
-            direccion VARCHAR(200),
-            fecha_registro DATETIME DEFAULT GETDATE()
-        );
-        """,
-        """
-        IF OBJECT_ID('EMPLEADO', 'U') IS NULL
-        CREATE TABLE EMPLEADO (
-            id_empleado INT IDENTITY(1,1) PRIMARY KEY,
-            nombre VARCHAR(100) NOT NULL,
-            cargo VARCHAR(50),
-            usuario VARCHAR(50) UNIQUE,
-            clave VARCHAR(50),
-            fecha_registro DATETIME DEFAULT GETDATE()
-        );
-        """,
-        """
-        IF OBJECT_ID('PRODUCTO', 'U') IS NULL
-        CREATE TABLE PRODUCTO (
-            id_producto INT IDENTITY(1,1) PRIMARY KEY,
-            codigo_barras VARCHAR(50),
-            nombre VARCHAR(100) NOT NULL,
-            precio DECIMAL(10,2) NOT NULL,
-            stock INT NOT NULL,
-            id_categoria INT FOREIGN KEY REFERENCES CATEGORIA(id_categoria),
-            id_proveedor INT FOREIGN KEY REFERENCES PROVEEDOR(id_proveedor),
-            fecha_registro DATETIME DEFAULT GETDATE()
-        );
-        """,
-        """
-        IF OBJECT_ID('VENTA', 'U') IS NULL
-        CREATE TABLE VENTA (
-            id_venta INT IDENTITY(1,1) PRIMARY KEY,
-            fecha DATETIME DEFAULT GETDATE(),
-            id_cliente INT FOREIGN KEY REFERENCES CLIENTE(id_cliente),
-            id_empleado INT FOREIGN KEY REFERENCES EMPLEADO(id_empleado),
-            total DECIMAL(10,2) NOT NULL
-        );
-        """,
-        """
-        IF OBJECT_ID('DETALLE_VENTA', 'U') IS NULL
-        CREATE TABLE DETALLE_VENTA (
-            id_detalle INT IDENTITY(1,1) PRIMARY KEY,
-            id_venta INT FOREIGN KEY REFERENCES VENTA(id_venta),
-            id_producto INT FOREIGN KEY REFERENCES PRODUCTO(id_producto),
-            cantidad INT NOT NULL,
-            precio_unitario DECIMAL(10,2) NOT NULL,
-            subtotal DECIMAL(10,2) NOT NULL
-        );
-        """
-    ]
-
-    for q in ddl_queries:
-        cursor_db.execute(q)
-
-    # Migración de columnas si la base de datos ya existía
-    columnas_migracion = [
-        ("PRODUCTO", "codigo_barras", "VARCHAR(50)"),
-        ("PRODUCTO", "fecha_registro", "DATETIME DEFAULT GETDATE()"),
-        ("CLIENTE", "fecha_registro", "DATETIME DEFAULT GETDATE()"),
-        ("EMPLEADO", "fecha_registro", "DATETIME DEFAULT GETDATE()")
-    ]
-    for tabla, col, tipo in columnas_migracion:
-        cursor_db.execute(f"""
-            IF EXISTS (SELECT * FROM sys.tables WHERE name = '{tabla}')
-            AND NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('{tabla}') AND name = '{col}')
-            BEGIN
-                ALTER TABLE {tabla} ADD {col} {tipo};
-            END
-        """)
-
-    # Datos Semilla (DML)
-    cursor_db.execute("SELECT COUNT(*) FROM CATEGORIA")
-    if cursor_db.fetchone()[0] == 0:
-        cursor_db.execute("INSERT INTO CATEGORIA (nombre, descripcion) VALUES ('Abarrotes', 'Productos de primera necesidad'), ('Bebidas', 'Gaseosas y jugos'), ('Lácteos', 'Leche, quesos y yogur'), ('Limpieza', 'Artículos para el hogar');")
-
-    cursor_db.execute("SELECT COUNT(*) FROM PROVEEDOR")
-    if cursor_db.fetchone()[0] == 0:
-        cursor_db.execute("INSERT INTO PROVEEDOR (nombre, ruc_dni, telefono, email) VALUES ('Distribuidora Central S.A.C.', '20123456789', '987654321', 'ventas@distribuidora.pe'), ('Comercial San Juan', '20987654321', '912345678', 'contacto@sanjuan.pe');")
-
-    cursor_db.execute("SELECT COUNT(*) FROM CLIENTE")
-    if cursor_db.fetchone()[0] == 0:
-        cursor_db.execute("INSERT INTO CLIENTE (nombre, documento, telefono, direccion) VALUES ('Público General', '00000000', '000000000', 'Tienda Local'), ('Juan Pérez', '45678912', '998877665', 'Av. Central 123');")
-
-    cursor_db.execute("SELECT COUNT(*) FROM EMPLEADO")
-    if cursor_db.fetchone()[0] == 0:
-        cursor_db.execute("INSERT INTO EMPLEADO (nombre, cargo, usuario, clave) VALUES ('Admin Angelmi', 'Administrador', 'admin', 'admin123'), ('Cajero 1', 'Cajero', 'cajero1', '1234');")
-
-    cursor_db.execute("SELECT COUNT(*) FROM PRODUCTO")
-    if cursor_db.fetchone()[0] == 0:
-        cursor_db.execute("""
-            INSERT INTO PRODUCTO (codigo_barras, nombre, precio, stock, id_categoria, id_proveedor) VALUES 
-            ('7750001001', 'Arroz Extra 1kg', 4.50, 50, 1, 1),
-            ('7750001002', 'Aceite Vegetal 1L', 8.20, 30, 1, 1),
-            ('7750001003', 'Leche Evaporada 400g', 3.80, 40, 3, 2),
-            ('7750001004', 'Inca Kola 1.5L', 6.50, 25, 2, 2);
-        """)
-
-    conn_db.close()
-    return conn_str_db
-
-CADENA_CONEXION = inicializar_base_de_datos()
-
-def get_connection():
-    return pyodbc.connect(CADENA_CONEXION, autocommit=True)
+inicializar_base_de_datos()
 
 # ==========================================
-# 4. FORMULARIO DE LOGIN
+# 4. FUNCIÓN PARA GENERAR EXCEL MULTI-PESTAÑA
+# ==========================================
+def generar_reporte_excel():
+    conn = get_connection()
+    output = io.BytesIO()
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_v = pd.read_sql("""
+            SELECT v.id_venta, v.fecha, c.nombre as cliente, e.nombre as empleado, v.total
+            FROM VENTA v
+            LEFT JOIN CLIENTE c ON v.id_cliente = c.id_cliente
+            LEFT JOIN EMPLEADO e ON v.id_empleado = e.id_empleado
+            ORDER BY v.id_venta DESC
+        """, conn)
+        df_v.to_excel(writer, sheet_name='Ventas', index=False)
+        
+        df_dv = pd.read_sql("""
+            SELECT d.id_detalle, d.id_venta, p.nombre as producto, d.cantidad, d.precio_unitario, d.subtotal
+            FROM DETALLE_VENTA d
+            LEFT JOIN PRODUCTO p ON d.id_producto = p.id_producto
+        """, conn)
+        df_dv.to_excel(writer, sheet_name='Detalle_Ventas', index=False)
+        
+        df_p = pd.read_sql("""
+            SELECT p.id_producto, p.nombre, p.precio, p.stock, c.nombre as categoria, pr.nombre as proveedor, p.fecha_registro
+            FROM PRODUCTO p
+            LEFT JOIN CATEGORIA c ON p.id_categoria = c.id_categoria
+            LEFT JOIN PROVEEDOR pr ON p.id_proveedor = pr.id_proveedor
+            ORDER BY p.id_producto DESC
+        """, conn)
+        df_p.to_excel(writer, sheet_name='Productos', index=False)
+        
+        df_c = pd.read_sql("SELECT id_cliente, nombre, documento, telefono, direccion, fecha_registro FROM CLIENTE", conn)
+        df_c.to_excel(writer, sheet_name='Clientes', index=False)
+        
+        df_e = pd.read_sql("SELECT id_empleado, nombre, cargo, usuario, fecha_registro FROM EMPLEADO", conn)
+        df_e.to_excel(writer, sheet_name='Empleados', index=False)
+        
+        df_cat = pd.read_sql("SELECT * FROM CATEGORIA", conn)
+        df_cat.to_excel(writer, sheet_name='Categorias', index=False)
+        
+        df_prv = pd.read_sql("SELECT * FROM PROVEEDOR", conn)
+        df_prv.to_excel(writer, sheet_name='Proveedores', index=False)
+        
+    conn.close()
+    return output.getvalue()
+
+# ==========================================
+# 5. FORMULARIO DE LOGIN
 # ==========================================
 def validar_login(usuario, clave):
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT id_empleado, nombre, cargo FROM EMPLEADO WHERE usuario = ? AND clave = ?", (usuario, clave))
+    cur.execute("SELECT id_empleado, nombre, cargo FROM EMPLEADO WHERE usuario = %s AND clave = %s", (usuario, clave))
     res = cur.fetchone()
+    cur.close()
     conn.close()
     return res
 
@@ -229,7 +226,7 @@ if not st.session_state.autenticado:
     st.stop()
 
 # ==========================================
-# 5. BARRA LATERAL Y NAVEGACIÓN
+# 6. BARRA LATERAL Y NAVEGACIÓN
 # ==========================================
 st.sidebar.title("🏪 Angelmi Market")
 st.sidebar.caption(f"👤 Conectado: **{st.session_state.usuario_actual['nombre']}** ({st.session_state.usuario_actual['cargo']})")
@@ -239,6 +236,18 @@ if st.sidebar.button("🚪 Cerrar Sesión"):
     st.session_state.usuario_actual = None
     st.session_state.carrito = []
     st.rerun()
+
+st.sidebar.divider()
+
+st.sidebar.download_button(
+    label="📊 Descargar Respaldo (Excel)",
+    data=generar_reporte_excel(),
+    file_name=f"Respaldo_AngelmiMarket_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    use_container_width=True
+)
+
+st.sidebar.divider()
 
 opcion = st.sidebar.radio(
     "Menú de Opciones",
@@ -251,7 +260,7 @@ opcion = st.sidebar.radio(
 if opcion == "🛒 Punto de Venta (POS)":
     st.title("🛒 Punto de Venta")
     conn = get_connection()
-    df_productos = pd.read_sql("SELECT p.id_producto, p.codigo_barras, p.nombre, p.precio, p.stock, c.nombre as categoria FROM PRODUCTO p LEFT JOIN CATEGORIA c ON p.id_categoria = c.id_categoria", conn)
+    df_productos = pd.read_sql("SELECT p.id_producto, p.nombre, p.precio, p.stock, c.nombre as categoria FROM PRODUCTO p LEFT JOIN CATEGORIA c ON p.id_categoria = c.id_categoria", conn)
     df_clientes = pd.read_sql("SELECT id_cliente, nombre FROM CLIENTE", conn)
     conn.close()
 
@@ -309,14 +318,16 @@ if opcion == "🛒 Punto de Venta (POS)":
                     try:
                         conn = get_connection()
                         cur = conn.cursor()
-                        cur.execute("INSERT INTO VENTA (id_cliente, id_empleado, total) OUTPUT INSERTED.id_venta VALUES (?, ?, ?)",
+                        cur.execute("INSERT INTO VENTA (id_cliente, id_empleado, total) VALUES (%s, %s, %s) RETURNING id_venta;",
                                     (id_cli, st.session_state.usuario_actual['id'], total_venta))
                         id_venta = cur.fetchone()[0]
                         
                         for item in st.session_state.carrito:
-                            cur.execute("INSERT INTO DETALLE_VENTA (id_venta, id_producto, cantidad, precio_unitario, subtotal) VALUES (?, ?, ?, ?, ?)",
+                            cur.execute("INSERT INTO DETALLE_VENTA (id_venta, id_producto, cantidad, precio_unitario, subtotal) VALUES (%s, %s, %s, %s, %s);",
                                         (id_venta, item['id_producto'], item['cantidad'], item['precio'], item['subtotal']))
-                            cur.execute("UPDATE PRODUCTO SET stock = stock - ? WHERE id_producto = ?", (item['cantidad'], item['id_producto']))
+                            cur.execute("UPDATE PRODUCTO SET stock = stock - %s WHERE id_producto = %s;", (item['cantidad'], item['id_producto']))
+                        conn.commit()
+                        cur.close()
                         conn.close()
                         st.session_state.carrito = []
                         st.balloons()
@@ -337,7 +348,7 @@ if opcion == "🛒 Punto de Venta (POS)":
 elif opcion == "📦 Gestión de Productos":
     st.title("📦 Gestión de Inventario y Productos")
     conn = get_connection()
-    df_prod = pd.read_sql("SELECT p.id_producto, p.codigo_barras, p.nombre, p.precio, p.stock, c.nombre as categoria, pr.nombre as proveedor, p.fecha_registro FROM PRODUCTO p LEFT JOIN CATEGORIA c ON p.id_categoria = c.id_categoria LEFT JOIN PROVEEDOR pr ON p.id_proveedor = pr.id_proveedor ORDER BY p.id_producto DESC", conn)
+    df_prod = pd.read_sql("SELECT p.id_producto, p.nombre, p.precio, p.stock, c.nombre as categoria, pr.nombre as proveedor, p.fecha_registro FROM PRODUCTO p LEFT JOIN CATEGORIA c ON p.id_categoria = c.id_categoria LEFT JOIN PROVEEDOR pr ON p.id_proveedor = pr.id_proveedor ORDER BY p.id_producto DESC", conn)
     df_cat = pd.read_sql("SELECT id_categoria, nombre FROM CATEGORIA", conn)
     df_prov = pd.read_sql("SELECT id_proveedor, nombre FROM PROVEEDOR", conn)
     conn.close()
@@ -347,7 +358,6 @@ elif opcion == "📦 Gestión de Productos":
 
     with st.expander("➕ Registrar Nuevo Producto"):
         with st.form("form_nuevo_prod"):
-            cod = st.text_input("Código de Barras")
             nom = st.text_input("Nombre del Producto")
             pre = st.number_input("Precio (S/)", min_value=0.1, value=1.0, step=0.5)
             stk = st.number_input("Stock Inicial", min_value=1, value=10, step=1)
@@ -357,8 +367,11 @@ elif opcion == "📦 Gestión de Productos":
             if st.form_submit_button("Guardar Producto"):
                 if nom:
                     conn = get_connection()
-                    conn.cursor().execute("INSERT INTO PRODUCTO (codigo_barras, nombre, precio, stock, id_categoria, id_proveedor) VALUES (?, ?, ?, ?, ?, ?)",
-                                          (cod, nom, pre, stk, cat, prv))
+                    cur = conn.cursor()
+                    cur.execute("INSERT INTO PRODUCTO (nombre, precio, stock, id_categoria, id_proveedor) VALUES (%s, %s, %s, %s, %s)",
+                                (nom, pre, stk, cat, prv))
+                    conn.commit()
+                    cur.close()
                     conn.close()
                     st.success("Producto registrado exitosamente.")
                     st.rerun()
@@ -385,7 +398,10 @@ elif opcion == "📁 Categorías y Proveedores":
             if st.form_submit_button("Agregar Categoría"):
                 if nom_cat:
                     conn = get_connection()
-                    conn.cursor().execute("INSERT INTO CATEGORIA (nombre, descripcion) VALUES (?, ?)", (nom_cat, desc_cat))
+                    cur = conn.cursor()
+                    cur.execute("INSERT INTO CATEGORIA (nombre, descripcion) VALUES (%s, %s)", (nom_cat, desc_cat))
+                    conn.commit()
+                    cur.close()
                     conn.close()
                     st.success("Categoría agregada.")
                     st.rerun()
@@ -401,7 +417,10 @@ elif opcion == "📁 Categorías y Proveedores":
             if st.form_submit_button("Agregar Proveedor"):
                 if nom_prv:
                     conn = get_connection()
-                    conn.cursor().execute("INSERT INTO PROVEEDOR (nombre, ruc_dni, telefono, email) VALUES (?, ?, ?, ?)", (nom_prv, ruc, tel, email))
+                    cur = conn.cursor()
+                    cur.execute("INSERT INTO PROVEEDOR (nombre, ruc_dni, telefono, email) VALUES (%s, %s, %s, %s)", (nom_prv, ruc, tel, email))
+                    conn.commit()
+                    cur.close()
                     conn.close()
                     st.success("Proveedor agregado.")
                     st.rerun()
@@ -428,7 +447,10 @@ elif opcion == "👥 Clientes y Empleados":
             if st.form_submit_button("Registrar Cliente"):
                 if nom:
                     conn = get_connection()
-                    conn.cursor().execute("INSERT INTO CLIENTE (nombre, documento, telefono, direccion) VALUES (?, ?, ?, ?)", (nom, doc, tel, dir_cli))
+                    cur = conn.cursor()
+                    cur.execute("INSERT INTO CLIENTE (nombre, documento, telefono, direccion) VALUES (%s, %s, %s, %s)", (nom, doc, tel, dir_cli))
+                    conn.commit()
+                    cur.close()
                     conn.close()
                     st.success("Cliente registrado.")
                     st.rerun()
@@ -445,7 +467,10 @@ elif opcion == "👥 Clientes y Empleados":
                 if nom_emp and user:
                     try:
                         conn = get_connection()
-                        conn.cursor().execute("INSERT INTO EMPLEADO (nombre, cargo, usuario, clave) VALUES (?, ?, ?, ?)", (nom_emp, cargo, user, passw))
+                        cur = conn.cursor()
+                        cur.execute("INSERT INTO EMPLEADO (nombre, cargo, usuario, clave) VALUES (%s, %s, %s, %s)", (nom_emp, cargo, user, passw))
+                        conn.commit()
+                        cur.close()
                         conn.close()
                         st.success("Empleado registrado.")
                         st.rerun()
@@ -503,7 +528,7 @@ elif opcion == "📐 Modelo Entidad-Relación (MER)":
         PROVEEDOR [label="PROVEEDOR\\n- id_proveedor (PK)\\n- nombre\\n- ruc_dni\\n- telefono\\n- email"];
         CLIENTE [label="CLIENTE\\n- id_cliente (PK)\\n- nombre\\n- documento\\n- fecha_registro"];
         EMPLEADO [label="EMPLEADO\\n- id_empleado (PK)\\n- nombre\\n- usuario\\n- clave\\n- fecha_registro"];
-        PRODUCTO [label="PRODUCTO\\n- id_producto (PK)\\n- codigo_barras\\n- nombre\\n- precio\\n- stock\\n- id_categoria (FK)\\n- id_proveedor (FK)\\n- fecha_registro"];
+        PRODUCTO [label="PRODUCTO\\n- id_producto (PK)\\n- nombre\\n- precio\\n- stock\\n- id_categoria (FK)\\n- id_proveedor (FK)\\n- fecha_registro"];
         VENTA [label="VENTA\\n- id_venta (PK)\\n- fecha\\n- id_cliente (FK)\\n- id_empleado (FK)\\n- total"];
         DETALLE_VENTA [label="DETALLE_VENTA\\n- id_detalle (PK)\\n- id_venta (FK)\\n- id_producto (FK)\\n- cantidad\\n- precio_unitario\\n- subtotal"];
 

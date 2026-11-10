@@ -307,6 +307,9 @@ opcion = st.sidebar.radio("Menú de Opciones", opciones_menu)
 # ==========================================
 # MÓDULO 1: POS
 # ==========================================
+# ==========================================
+# MÓDULO 1: POS
+# ==========================================
 if opcion == "🛒 Punto de Venta (POS)":
     st.title("🛒 Punto de Venta")
     df_productos = consultar_db("SELECT p.id_producto, p.nombre, p.precio, p.stock, c.nombre as categoria FROM PRODUCTO p LEFT JOIN CATEGORIA c ON p.id_categoria = c.id_categoria")
@@ -331,8 +334,8 @@ if opcion == "🛒 Punto de Venta (POS)":
                 for item in st.session_state.carrito:
                     if item['id_producto'] == info_prod['id_producto']:
                         if item['cantidad'] + cantidad <= info_prod['stock']:
-                            item['cantidad'] += cantidad
-                            item['subtotal'] = item['cantidad'] * item['precio']
+                            item['cantidad'] += int(cantidad)
+                            item['subtotal'] = float(item['cantidad'] * item['precio'])
                             encontrado = True
                             st.success(f"Se actualizó la cantidad de {info_prod['nombre']}.")
                         else:
@@ -357,7 +360,9 @@ if opcion == "🛒 Punto de Venta (POS)":
         if st.session_state.carrito:
             df_cart = pd.DataFrame(st.session_state.carrito)
             st.dataframe(df_cart[['nombre', 'precio', 'cantidad', 'subtotal']], use_container_width=True)
-            total_venta = df_cart['subtotal'].sum()
+            
+            # Convertimos explícitamente el total a float nativo de Python para evitar el error np.float64
+            total_venta = float(df_cart['subtotal'].sum())
             st.markdown(f"### **Total a Pagar: S/ {total_venta:.2f}**")
             
             c1, c2 = st.columns(2)
@@ -367,7 +372,7 @@ if opcion == "🛒 Punto de Venta (POS)":
                         conn = get_connection()
                         cur = conn.cursor()
                         cur.execute("INSERT INTO VENTA (id_cliente, id_empleado, total) VALUES (%s, %s, %s) RETURNING id_venta;",
-                                    (id_cli, st.session_state.usuario_actual['id'], total_venta))
+                                    (int(id_cli), int(st.session_state.usuario_actual['id']), float(total_venta)))
                         id_venta = cur.fetchone()[0]
                         
                         detalles_log = []
@@ -375,8 +380,8 @@ if opcion == "🛒 Punto de Venta (POS)":
                         
                         for item in st.session_state.carrito:
                             cur.execute("INSERT INTO DETALLE_VENTA (id_venta, id_producto, cantidad, precio_unitario, subtotal) VALUES (%s, %s, %s, %s, %s);",
-                                        (id_venta, item['id_producto'], item['cantidad'], item['precio'], item['subtotal']))
-                            cur.execute("UPDATE PRODUCTO SET stock = stock - %s WHERE id_producto = %s RETURNING stock, nombre;", (item['cantidad'], item['id_producto']))
+                                        (int(id_venta), int(item['id_producto']), int(item['cantidad']), float(item['precio']), float(item['subtotal'])))
+                            cur.execute("UPDATE PRODUCTO SET stock = stock - %s WHERE id_producto = %s RETURNING stock, nombre;", (int(item['cantidad']), int(item['id_producto'])))
                             res_stk = cur.fetchone()
                             if res_stk and res_stk[0] == 0:
                                 productos_agotados.append(res_stk[1])
@@ -389,7 +394,6 @@ if opcion == "🛒 Punto de Venta (POS)":
                         st.session_state.carrito = []
                         registrar_log("VENTA_PROCESADA", f"Venta N°{id_venta} por S/{total_venta:.2f}. Productos: {', '.join(detalles_log)}")
                         
-                        # Alerta emergente flotante arriba a la derecha si un producto llega a stock 0
                         for prod_agotado in productos_agotados:
                             st.toast(f"🚨 ¡ATENCIÓN! El producto '{prod_agotado}' se ha quedado SIN STOCK.", icon="⚠️")
                             
@@ -404,7 +408,6 @@ if opcion == "🛒 Punto de Venta (POS)":
                     st.rerun()
         else:
             st.info("El carrito de compras está vacío.")
-
 # ==========================================
 # MÓDULO 2: SALA ESTADÍSTICA (ANALYTICS)
 # ==========================================

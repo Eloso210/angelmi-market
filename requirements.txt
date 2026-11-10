@@ -1,4 +1,5 @@
 streamlit
 pandas
-pyodbc
+psycopg2-binary
 graphviz
+openpyxl

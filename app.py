@@ -553,7 +553,7 @@ elif opcion == "📦 Gestión de Productos":
                         st.success("Producto registrado exitosamente.")
                         st.rerun()
                     else:
-                        st.warning("El nombre del producto es obligatorio.")
+                        st.warning("El nombre del producto me obligatorio.")
 
     with col_del:
         if es_admin:
@@ -567,20 +567,26 @@ elif opcion == "📦 Gestión de Productos":
                                 conn = get_connection()
                                 cur = conn.cursor()
                                 nom_p = df_prod[df_prod['id_producto']==prod_elim]['nombre'].values[0]
-                                cur.execute("DELETE FROM PRODUCTO WHERE id_producto = %s", (prod_elim,))
+                                
+                                # 1. Eliminar referencias del producto en detalles de ventas registradas
+                                cur.execute("DELETE FROM DETALLE_VENTA WHERE id_producto = %s;", (prod_elim,))
+                                
+                                # 2. Eliminar el producto de la base de datos
+                                cur.execute("DELETE FROM PRODUCTO WHERE id_producto = %s;", (prod_elim,))
+                                
                                 conn.commit()
                                 cur.close()
                                 conn.close()
+                                
                                 registrar_log("PRODUCTO_ELIMINADO", f"Eliminado producto ID {prod_elim} ({nom_p}) por el Admin.")
-                                st.success(f"Producto '{nom_p}' eliminado.")
+                                st.success(f"Producto '{nom_p}' eliminado exitosamente.")
                                 st.rerun()
-                            except Exception:
-                                st.error("No se puede eliminar un producto que ya tiene ventas asociadas en el historial.")
+                            except Exception as e:
+                                st.error(f"Error al eliminar producto: {e}")
                         else:
                             st.error("Contraseña de administrador incorrecta.")
         else:
             st.info("🔒 La opción de eliminar productos requiere permisos de Administrador.")
-
 # ==========================================
 # MÓDULO 4: CATEGORÍAS Y PROVEEDORES
 # ==========================================

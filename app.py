@@ -61,6 +61,7 @@ def registrar_log(accion, detalle):
 
 @st.cache_resource
 def verificar_base_de_datos():
+    """Verifica la existencia de las 8 tablas normalizadas (3FN) y sus restricciones SQL."""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -149,32 +150,6 @@ def verificar_base_de_datos():
                 cur.execute(q)
             except Exception:
                 pass
-
-        cur.execute("SELECT COUNT(*) FROM CATEGORIA;")
-        if cur.fetchone()[0] == 0:
-            cur.execute("INSERT INTO CATEGORIA (nombre, descripcion) VALUES ('Abarrotes', 'Productos de primera necesidad'), ('Bebidas', 'Gaseosas y jugos'), ('Lácteos', 'Leche, quesos y yogur'), ('Limpieza', 'Artículos para el hogar');")
-
-        cur.execute("SELECT COUNT(*) FROM PROVEEDOR;")
-        if cur.fetchone()[0] == 0:
-            cur.execute("INSERT INTO PROVEEDOR (nombre, ruc_dni, telefono, email) VALUES ('Distribuidora Central S.A.C.', '20123456789', '987654321', 'ventas@distribuidora.pe'), ('Comercial San Juan', '20987654321', '912345678', 'contacto@sanjuan.pe');")
-
-        cur.execute("SELECT COUNT(*) FROM CLIENTE;")
-        if cur.fetchone()[0] == 0:
-            cur.execute("INSERT INTO CLIENTE (nombre, documento, telefono, direccion) VALUES ('Público General', '00000000', '000000000', 'Tienda Local'), ('Juan Pérez', '45678912', '998877665', 'Av. Central 123');")
-
-        cur.execute("SELECT COUNT(*) FROM EMPLEADO;")
-        if cur.fetchone()[0] == 0:
-            cur.execute("INSERT INTO EMPLEADO (nombre, cargo, usuario, clave) VALUES ('Admin Angelmi', 'Administrador', 'admin', 'admin123'), ('Cajero 1', 'Cajero', 'cajero1', '1234');")
-
-        cur.execute("SELECT COUNT(*) FROM PRODUCTO;")
-        if cur.fetchone()[0] == 0:
-            cur.execute("""
-                INSERT INTO PRODUCTO (nombre, precio, stock, id_categoria, id_proveedor) VALUES 
-                ('Arroz Extra 1kg', 4.50, 50, 1, 1),
-                ('Aceite Vegetal 1L', 8.20, 30, 1, 1),
-                ('Leche Evaporada 400g', 3.80, 40, 3, 2),
-                ('Inca Kola 1.5L', 6.50, 25, 2, 2);
-            """)
 
         conn.commit()
         cur.close()

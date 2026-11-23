@@ -69,7 +69,7 @@ def verificar_base_de_datos():
             """
             CREATE TABLE IF NOT EXISTS CATEGORIA (
                 id_categoria SERIAL PRIMARY KEY,
-                nombre VARCHAR(100) NOT NULL,
+                nombre VARCHAR(100) NOT NULL UNIQUE,
                 descripcion VARCHAR(255)
             );
             """,
@@ -86,7 +86,7 @@ def verificar_base_de_datos():
             CREATE TABLE IF NOT EXISTS CLIENTE (
                 id_cliente SERIAL PRIMARY KEY,
                 nombre VARCHAR(100) NOT NULL,
-                documento VARCHAR(20),
+                documento VARCHAR(20) NOT NULL UNIQUE,
                 telefono VARCHAR(20),
                 direccion VARCHAR(200),
                 fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -106,10 +106,10 @@ def verificar_base_de_datos():
             CREATE TABLE IF NOT EXISTS PRODUCTO (
                 id_producto SERIAL PRIMARY KEY,
                 nombre VARCHAR(100) NOT NULL,
-                precio NUMERIC(10,2) NOT NULL,
-                stock INT NOT NULL,
-                id_categoria INT REFERENCES CATEGORIA(id_categoria),
-                id_proveedor INT REFERENCES PROVEEDOR(id_proveedor),
+                precio NUMERIC(10,2) NOT NULL CHECK (precio >= 0),
+                stock INT NOT NULL CHECK (stock >= 0),
+                id_categoria INT NOT NULL REFERENCES CATEGORIA(id_categoria),
+                id_proveedor INT NOT NULL REFERENCES PROVEEDOR(id_proveedor),
                 fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """,
@@ -117,19 +117,19 @@ def verificar_base_de_datos():
             CREATE TABLE IF NOT EXISTS VENTA (
                 id_venta SERIAL PRIMARY KEY,
                 fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                id_cliente INT REFERENCES CLIENTE(id_cliente),
-                id_empleado INT REFERENCES EMPLEADO(id_empleado),
-                total NUMERIC(10,2) NOT NULL
+                id_cliente INT NOT NULL REFERENCES CLIENTE(id_cliente),
+                id_empleado INT NOT NULL REFERENCES EMPLEADO(id_empleado),
+                total NUMERIC(10,2) NOT NULL CHECK (total >= 0)
             );
             """,
             """
             CREATE TABLE IF NOT EXISTS DETALLE_VENTA (
                 id_detalle SERIAL PRIMARY KEY,
-                id_venta INT REFERENCES VENTA(id_venta),
-                id_producto INT REFERENCES PRODUCTO(id_producto),
-                cantidad INT NOT NULL,
-                precio_unitario NUMERIC(10,2) NOT NULL,
-                subtotal NUMERIC(10,2) NOT NULL
+                id_venta INT NOT NULL REFERENCES VENTA(id_venta),
+                id_producto INT NOT NULL REFERENCES PRODUCTO(id_producto),
+                cantidad INT NOT NULL CHECK (cantidad > 0),
+                precio_unitario NUMERIC(10,2) NOT NULL CHECK (precio_unitario >= 0),
+                subtotal NUMERIC(10,2) NOT NULL CHECK (subtotal >= 0)
             );
             """,
             """
@@ -300,13 +300,10 @@ st.sidebar.divider()
 
 opciones_menu = ["🛒 Punto de Venta (POS)", "📈 Sala Estadística (Analytics)", "📦 Gestión de Productos", "📁 Categorías y Proveedores", "👥 Clientes y Empleados", "📊 Histórico de Ventas", "📐 Modelo Entidad-Relación (MER)"]
 if es_admin:
-    opciones_menu.append("📜 Bitácora de Auditoría (.LDF)")
+    opciones_menu.append("📜 Bitácora de Auditoría (.log)")
 
 opcion = st.sidebar.radio("Menú de Opciones", opciones_menu)
 
-# ==========================================
-# MÓDULO 1: POS
-# ==========================================
 # ==========================================
 # MÓDULO 1: POS
 # ==========================================
@@ -408,6 +405,7 @@ if opcion == "🛒 Punto de Venta (POS)":
                     st.rerun()
         else:
             st.info("El carrito de compras está vacío.")
+
 # ==========================================
 # MÓDULO 2: SALA ESTADÍSTICA (ANALYTICS)
 # ==========================================
@@ -542,18 +540,21 @@ elif opcion == "📦 Gestión de Productos":
                 
                 if st.form_submit_button("Guardar Producto"):
                     if nom:
-                        conn = get_connection()
-                        cur = conn.cursor()
-                        cur.execute("INSERT INTO PRODUCTO (nombre, precio, stock, id_categoria, id_proveedor) VALUES (%s, %s, %s, %s, %s)",
-                                    (nom, pre, stk, cat, prv))
-                        conn.commit()
-                        cur.close()
-                        conn.close()
-                        registrar_log("PRODUCTO_CREADO", f"Creación de producto: {nom} - Precio S/{pre:.2f} - Stock: {stk}")
-                        st.success("Producto registrado exitosamente.")
-                        st.rerun()
+                        try:
+                            conn = get_connection()
+                            cur = conn.cursor()
+                            cur.execute("INSERT INTO PRODUCTO (nombre, precio, stock, id_categoria, id_proveedor) VALUES (%s, %s, %s, %s, %s)",
+                                        (nom, pre, stk, cat, prv))
+                            conn.commit()
+                            cur.close()
+                            conn.close()
+                            registrar_log("PRODUCTO_CREADO", f"Creación de producto: {nom} - Precio S/{pre:.2f} - Stock: {stk}")
+                            st.success("Producto registrado exitosamente.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error al registrar producto: {e}")
                     else:
-                        st.warning("El nombre del producto me obligatorio.")
+                        st.warning("El nombre del producto es obligatorio.")
 
     with col_del:
         if es_admin:
@@ -587,6 +588,7 @@ elif opcion == "📦 Gestión de Productos":
                             st.error("Contraseña de administrador incorrecta.")
         else:
             st.info("🔒 La opción de eliminar productos requiere permisos de Administrador.")
+
 # ==========================================
 # MÓDULO 4: CATEGORÍAS Y PROVEEDORES
 # ==========================================
@@ -604,15 +606,18 @@ elif opcion == "📁 Categorías y Proveedores":
             desc_cat = st.text_input("Descripción")
             if st.form_submit_button("Agregar Categoría"):
                 if nom_cat:
-                    conn = get_connection()
-                    cur = conn.cursor()
-                    cur.execute("INSERT INTO CATEGORIA (nombre, descripcion) VALUES (%s, %s)", (nom_cat, desc_cat))
-                    conn.commit()
-                    cur.close()
-                    conn.close()
-                    registrar_log("CATEGORIA_CREADA", f"Categoría creada: {nom_cat}")
-                    st.success("Categoría agregada.")
-                    st.rerun()
+                    try:
+                        conn = get_connection()
+                        cur = conn.cursor()
+                        cur.execute("INSERT INTO CATEGORIA (nombre, descripcion) VALUES (%s, %s)", (nom_cat, desc_cat))
+                        conn.commit()
+                        cur.close()
+                        conn.close()
+                        registrar_log("CATEGORIA_CREADA", f"Categoría creada: {nom_cat}")
+                        st.success("Categoría agregada.")
+                        st.rerun()
+                    except Exception:
+                        st.error("No se pudo agregar: la categoría ya existe en el sistema.")
 
         if es_admin and not df_cat.empty:
             with st.expander("🗑️ Eliminar Categoría (Admin)"):
@@ -698,16 +703,21 @@ elif opcion == "👥 Clientes y Empleados":
             tel = st.text_input("Teléfono")
             dir_cli = st.text_input("Dirección")
             if st.form_submit_button("Registrar Cliente"):
-                if nom:
-                    conn = get_connection()
-                    cur = conn.cursor()
-                    cur.execute("INSERT INTO CLIENTE (nombre, documento, telefono, direccion) VALUES (%s, %s, %s, %s)", (nom, doc, tel, dir_cli))
-                    conn.commit()
-                    cur.close()
-                    conn.close()
-                    registrar_log("CLIENTE_CREADO", f"Cliente creado: {nom} ({doc})")
-                    st.success("Cliente registrado.")
-                    st.rerun()
+                if nom and doc:
+                    try:
+                        conn = get_connection()
+                        cur = conn.cursor()
+                        cur.execute("INSERT INTO CLIENTE (nombre, documento, telefono, direccion) VALUES (%s, %s, %s, %s)", (nom, doc, tel, dir_cli))
+                        conn.commit()
+                        cur.close()
+                        conn.close()
+                        registrar_log("CLIENTE_CREADO", f"Cliente creado: {nom} ({doc})")
+                        st.success("Cliente registrado.")
+                        st.rerun()
+                    except Exception:
+                        st.error("Error: el DNI o RUC ingresado ya se encuentra registrado.")
+                else:
+                    st.warning("El nombre y el DNI / RUC son obligatorios.")
 
         if es_admin and not df_cli.empty:
             with st.expander("🗑️ Eliminar Cliente (Admin)"):
@@ -813,8 +823,8 @@ elif opcion == "📊 Histórico de Ventas":
 # ==========================================
 # MÓDULO 7: BITÁCORA DE AUDITORÍA (SOLO ADMIN)
 # ==========================================
-elif opcion == "📜 Bitácora de Auditoría (.LDF)":
-    st.title("📜 Bitácora de Auditoría y Registro de Transacciones (.LDF)")
+elif opcion == "📜 Bitácora de Auditoría (.log)":
+    st.title("📜 Bitácora de Auditoría y Registro de Transacciones (.log)")
     st.info("🔒 Registro inalterable de operaciones. Esta sección y sus registros no pueden ser eliminados ni modificados por ningún usuario.")
     
     df_logs = consultar_db("""
@@ -839,13 +849,13 @@ elif opcion == "📐 Modelo Entidad-Relación (MER)":
         node [shape=rectangle, style=filled, fillcolor="#EBF5FB", color="#1F618D", fontname="Helvetica"];
         edge [color="#2E4053", fontname="Helvetica", fontsize=10];
 
-        CATEGORIA [label="CATEGORIA\\n- id_categoria (PK)\\n- nombre\\n- descripcion"];
+        CATEGORIA [label="CATEGORIA\\n- id_categoria (PK)\\n- nombre (UNIQUE)\\n- descripcion"];
         PROVEEDOR [label="PROVEEDOR\\n- id_proveedor (PK)\\n- nombre\\n- ruc_dni\\n- telefono\\n- email"];
-        CLIENTE [label="CLIENTE\\n- id_cliente (PK)\\n- nombre\\n- documento\\n- fecha_registro"];
-        EMPLEADO [label="EMPLEADO\\n- id_empleado (PK)\\n- nombre\\n- cargo\\n- usuario\\n- clave\\n- fecha_registro"];
-        PRODUCTO [label="PRODUCTO\\n- id_producto (PK)\\n- nombre\\n- precio\\n- stock\\n- id_categoria (FK)\\n- id_proveedor (FK)\\n- fecha_registro"];
-        VENTA [label="VENTA\\n- id_venta (PK)\\n- fecha\\n- id_cliente (FK)\\n- id_empleado (FK)\\n- total"];
-        DETALLE_VENTA [label="DETALLE_VENTA\\n- id_detalle (PK)\\n- id_venta (FK)\\n- id_producto (FK)\\n- cantidad\\n- precio_unitario\\n- subtotal"];
+        CLIENTE [label="CLIENTE\\n- id_cliente (PK)\\n- nombre\\n- documento (UNIQUE)\\n- telefono\\n- direccion\\n- fecha_registro"];
+        EMPLEADO [label="EMPLEADO\\n- id_empleado (PK)\\n- nombre\\n- cargo\\n- usuario (UNIQUE)\\n- clave\\n- fecha_registro"];
+        PRODUCTO [label="PRODUCTO\\n- id_producto (PK)\\n- nombre\\n- precio (CHECK >= 0)\\n- stock (CHECK >= 0)\\n- id_categoria (FK)\\n- id_proveedor (FK)\\n- fecha_registro"];
+        VENTA [label="VENTA\\n- id_venta (PK)\\n- fecha\\n- id_cliente (FK)\\n- id_empleado (FK)\\n- total (CHECK >= 0)"];
+        DETALLE_VENTA [label="DETALLE_VENTA\\n- id_detalle (PK)\\n- id_venta (FK)\\n- id_producto (FK)\\n- cantidad (CHECK > 0)\\n- precio_unitario (CHECK >= 0)\\n- subtotal (CHECK >= 0)"];
         AUDITORIA_LOG [label="AUDITORIA_LOG\\n- id_log (PK)\\n- fecha\\n- id_empleado (FK)\\n- usuario\\n- accion\\n- detalle"];
 
         CATEGORIA -> PRODUCTO [label="1 : N"];
